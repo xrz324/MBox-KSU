@@ -1,0 +1,6 @@
+id=mbox
+name=Box KernelSU
+version=v1.0
+versionCode=100
+author=桉陌
+description=Use Mihomo with TUN proxy on Android devices.

@@ -1,0 +1,390 @@
+ipv6: false
+mode: rule
+allow-lan: false
+log-level: silent
+unified-delay: true
+tcp-concurrent: true
+find-process-mode: always
+external-ui: "./web/"
+external-ui-url: "https://github.com/Zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip"
+external-controller: 127.0.0.1:9090
+
+# —————————
+
+p: &p
+  {health-check: {enable: false, url: https://cp.cloudflare.com, interval: 14400, lazy: true}}
+
+proxy-providers:
+  Hosted:
+    <<: *p
+    type: file
+    path: ./proxies/Hosted.uri
+
+  Provider:
+    <<: *p
+    type: http
+    proxy: 订阅更新
+    interval: 86400
+    path: ./proxies/Provider.yaml
+    filter: "^(?!.*(套餐|重置|剩余|到期|网址)).*$"
+
+Auto: &Auto
+  type: url-test
+  tolerance: 50
+  use:
+  - Provider
+
+Man: &Man
+  type: select
+  use:
+  - Provider
+
+Min: &Min
+  type: select
+  use:
+  - Hosted
+
+# —————————
+
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+hosts:
+  mtalk.google.com: 108.177.125.188
+  alt1-mtalk.google.com: [209.85.144.188, 192.178.131.188]
+  alt2-mtalk.google.com: [209.85.144.188, 192.178.131.188]
+  alt3-mtalk.google.com: [209.85.144.188, 192.178.131.188]
+  alt4-mtalk.google.com: [209.85.144.188, 192.178.131.188]
+  alt5-mtalk.google.com: [209.85.144.188, 192.178.131.188]
+  alt6-mtalk.google.com: [209.85.144.188, 192.178.131.188]
+
+# —————————
+
+# Sniffer
+sniffer:
+  enable: true
+  parse-pure-ip: true
+  override-destination: true
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+    TLS:
+      ports: [443, 5228, 8443]
+    QUIC:
+      ports: [443, 8443]
+
+# TUN
+tun:
+  enable: true
+  device: Mihomo
+  stack: system
+  dns-hijack:
+    - any:53
+    - tcp://any:53
+  gso: true
+  auto-route: true
+  strict-route: true
+  auto-redirect: false
+  auto-detect-interface: true
+  exclude-package:
+    - org.localsend.localsend_app
+
+# DNS
+dns:
+  enable: true
+  ipv6: false
+  # use-hosts: false
+  listen: 127.0.0.1:1053
+  cache-algorithm: arc
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  # fake-ip-range6: fdfe:dcba:9876::1/64
+  fake-ip-filter-mode: blacklist
+  fake-ip-filter:
+    - "+.lan"
+    - "+.local"
+    - '+.localhost'
+  nameserver-policy:
+    "RULE-SET:CN,Private":
+      - https://223.5.5.5/dns-query#直连
+      - https://223.6.6.6/dns-query#直连
+  nameserver:
+    - https://1.1.1.1/dns-query#DNS
+    - https://8.8.8.8/dns-query#DNS
+  default-nameserver:
+    - https://223.5.5.5/dns-query#直连
+    - https://223.6.6.6/dns-query#直连
+  direct-nameserver:
+    - https://223.5.5.5/dns-query#直连
+    - https://223.6.6.6/dns-query#直连
+  proxy-server-nameserver:
+    - https://223.5.5.5/dns-query#直连
+    - https://223.6.6.6/dns-query#直连
+
+# —————————
+
+proxies:
+  - {name: 直连, type: direct, udp: true}
+  - {name: 屏蔽, type: reject}
+
+Proxy_man: &Proxy_man
+    type: select
+    proxies:
+      - 全局
+      - 下载
+      - 香港
+      - 台湾
+      - 新加坡
+      - 日本
+      - 美国
+      - 其他
+      - 直连
+      - 屏蔽
+
+CN_man: &CN_man
+    type: select
+    proxies:
+      - 直连
+      - 全局
+      - 下载
+      - 香港
+      - 台湾
+      - 新加坡
+      - 日本
+      - 美国
+      - 其他
+      - 屏蔽
+
+Proxy_hid: &Proxy_hid
+    hidden: true
+    type: select
+    proxies:
+      - 全局
+
+Proxy_upg: &Proxy_upg
+    hidden: true
+    type: select
+    proxies:
+      - 下载
+
+Proxy_gen: &Proxy_gen
+    type: select
+    proxies:
+      - 全局
+      - 直连
+
+CN_gen: &CN_gen
+    type: select
+    proxies:
+      - 直连
+      - 全局
+
+# —————————
+
+proxy-groups:
+  - name: 全局
+    type: select
+    proxies:
+      - 香港
+      - 台湾
+      - 新加坡
+      - 日本
+      - 美国
+      - 下载
+      - 其他
+      - 直连
+
+  - name: 香港
+    filter: "^(?=.*(香港)).*$"
+#    <<: *Auto
+    <<: *Man
+
+  - name: 台湾
+    filter: "^(?=.*(台湾)).*$"
+#    <<: *Auto
+    <<: *Man
+
+  - name: 日本
+    filter: "^(?=.*(日本)).*$"
+#    <<: *Auto
+    <<: *Man
+
+  - name: 美国
+    filter: "^(?=.*(美国)).*$"
+#    <<: *Auto
+    <<: *Man
+
+  - name: 新加坡
+    filter: "^(?=.*(新加坡)).*$"
+#    <<: *Auto
+    <<: *Man
+
+  - name: 其他
+    filter: "^(?!.*(香港|日本|美国|台湾|新加坡)).*$"
+#    <<: *Auto
+    <<: *Man
+
+  - name: 下载
+    <<: *Min
+
+# —————————
+
+  - name: Douyin
+    <<: *CN_man
+
+  - name: BiliBili
+    <<: *CN_gen
+
+  - name: GitHub
+    <<: *Proxy_man
+
+  - name: Google
+    <<: *Proxy_man
+
+  - name: Microsoft
+    <<: *CN_man
+
+  - name: GoogleFCM
+    <<: *Proxy_gen
+
+  - name: DNS
+    <<: *Proxy_hid
+
+  - name: 订阅更新
+    <<: *Proxy_upg
+
+  - name: 漏网之鱼
+    <<: *Proxy_gen
+
+# —————————
+
+rule-anchor:
+  Local: &Local
+    {type: file, behavior: classical, format: text}
+  IPCIDR: &IPCIDR
+    {type: http, behavior: ipcidr, format: mrs, interval: 86400}
+  Domain: &Domain
+    {type: http, behavior: domain, format: mrs, interval: 86400}
+  YamlSet: &YamlSet
+    {type: http, behavior: classical, format: yaml, interval: 86400}
+
+# —————————
+
+rule-providers:
+  追加代理:
+    <<: *Local
+    path: ./etc/proxy.list
+
+  追加屏蔽:
+    <<: *Local
+    path: ./etc/block.list
+
+  追加绕过:
+    <<: *Local
+    path: ./etc/bypass.list
+
+  CN:
+    <<: *Domain
+    path: ./rules/CN.mrs
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs"
+  CNIP:
+    <<: *IPCIDR
+    path: ./rules/CNIP.mrs
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cn.mrs"
+
+  Ban-ad:
+    <<: *Domain
+    path: ./rules/Ban-ad.mrs
+    url: "https://raw.githubusercontent.com/Xrz324/AdRules/main/adrules-mihomo.mrs"
+  Ban-ads:
+    <<: *YamlSet
+    path: ./rules/Ban-ads.yaml
+    url: "https://raw.githubusercontent.com/Xrz324/AdRules/main/adrules-mihomo.yaml"
+
+  DouYin:
+    <<: *Domain
+    path: ./rules/DouYin.mrs
+    url: "https://raw.githubusercontent.com/GitMetaio/rule/master/rule/Clash/DouYin/DouYin_OCD_Domain.mrs"
+
+  BiliBili:
+    <<: *Domain
+    path: ./rules/BiliBili.mrs
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/bilibili.mrs"
+  BiliIntl:
+    <<: *Domain
+    path: ./rules/BiliIntl.mrs
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/biliintl.mrs"
+
+  Google:
+    <<: *Domain
+    path: ./rules/Google.mrs
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/google.mrs"
+
+  GoogleFCM:
+    <<: *Domain
+    path: ./rules/GoogleFCM.mrs
+    url: "https://raw.githubusercontent.com/GitMetaio/rule/master/rule/Clash/GoogleFCM/GoogleFCM_OCD_Domain.mrs"
+  GoogleFCMIP:
+    <<: *IPCIDR
+    path: ./rules/GoogleFCMIP.mrs
+    url: "https://raw.githubusercontent.com/GitMetaio/rule/master/rule/Clash/GoogleFCM/GoogleFCM_OCD_IP.mrs"
+
+  Microsoft:
+    <<: *Domain
+    path: ./rules/Microsoft.mrs
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/microsoft.mrs"
+
+  GitHub:
+    <<: *Domain
+    path: ./rules/GitHub.mrs
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/github.mrs"
+
+  Private:
+    <<: *Domain
+    path: ./rules/Private.mrs
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.mrs"
+  PrivateIP:
+    <<: *IPCIDR
+    path: ./rules/PrivateIP.mrs
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/private.mrs"
+
+# —————————
+
+rules:
+  # Avoid DNS Bypass
+  - DST-PORT,853,屏蔽
+
+  # Domain Rules
+  - RULE-SET,Ban-ads,屏蔽,no-resolve
+  - RULE-SET,Ban-ad,屏蔽
+  - RULE-SET,追加屏蔽,屏蔽
+  - RULE-SET,追加代理,全局
+  - RULE-SET,追加绕过,直连
+  - RULE-SET,Private,直连
+  - RULE-SET,GitHub,GitHub
+  - RULE-SET,DouYin,Douyin
+  - RULE-SET,BiliBili,BiliBili
+  - RULE-SET,BiliIntl,BiliBili
+  - RULE-SET,GoogleFCM,GoogleFCM
+  - RULE-SET,Microsoft,Microsoft
+  - RULE-SET,Google,Google
+  - RULE-SET,CN,直连
+
+  # IP Rules
+  - RULE-SET,GoogleFCMIP,GoogleFCM,no-resolve
+  - RULE-SET,PrivateIP,直连,no-resolve
+  - RULE-SET,CNIP,直连
+
+  # Process Rules
+  - PROCESS-PATH,com.example.piliplus,BiliBili
+  - PROCESS-PATH,com.ss.android.ugc.aweme,Douyin
+  - PROCESS-PATH,com.ss.android.ugc.aweme.mobile,Douyin
+  - PROCESS-PATH,com.android.vending,Google
+  - PROCESS-PATH,com.google.android.gms,Google
+  - PROCESS-PATH,com.google.android.gsf,Google
+  - PROCESS-PATH,com.google.android.apps.photos,Google
+  - PROCESS-PATH,com.google.android.apps.youtube.music,Google
+
+  # Missing Handle
+  - MATCH,漏网之鱼

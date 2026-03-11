@@ -1,0 +1,26 @@
+#!/system/bin/sh
+
+scripts_dir=$(dirname "$0")
+
+box_path="/data/adb/box"
+run_path="${box_path}/run"
+
+service_path="${scripts_dir}/box.service"
+
+events=$1
+monitor_dir=$2
+monitor_file=$3
+
+service_control() {
+    if [ "${monitor_file}" = "disable" ]; then
+        if [ "${events}" = "d" ]; then
+            "${service_path}" start >> /dev/null 2>> "${run_path}/run.log"
+        elif [ "${events}" = "n" ]; then
+            "${service_path}" stop >> /dev/null 2>> "${run_path}/run.log"
+        fi
+    fi
+}
+
+mkdir -p "${run_path}"
+
+service_control
