@@ -15,8 +15,4 @@ scripts_dir="/data/adb/box/scripts"
   "${scripts_dir}/start.sh"
 )&
 
-if command -v inotifyd > /dev/null 2>&1; then
-  inotifyd "${scripts_dir}/box.inotify" "${module_dir}" > /dev/null 2>&1 &
-elif command -v busybox > /dev/null 2>&1 && busybox --list 2> /dev/null | grep -qx inotifyd; then
-  busybox inotifyd "${scripts_dir}/box.inotify" "${module_dir}" > /dev/null 2>&1 &
-fi
+busybox inotifyd "${scripts_dir}/box.inotify" "${module_dir}" > /dev/null 2>&1 &

@@ -3,66 +3,85 @@
 SKIPUNZIP=1
 ASH_STANDALONE=1
 
-if [ "$BOOTMODE" ! = true ] ; then
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
+
+tproxy_check_chain="MBOX_CHECK_$$"
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    abort "Error: Required command not found: $1"
+  fi
+}
+
+check_busybox_applets() {
+  local applet
+  local applets="awk inotifyd nohup pidof setuidgid"
+
+  for applet in $applets; do
+    if ! busybox --list | busybox grep -qx "$applet"; then
+      abort "Error: BusyBox applet not found: $applet"
+    fi
+  done
+}
+
+cleanup_tproxy_check() {
+  iptables -w 100 -t mangle -F "$tproxy_check_chain" >/dev/null 2>&1 || true
+  iptables -w 100 -t mangle -X "$tproxy_check_chain" >/dev/null 2>&1 || true
+}
+
+check_tproxy_support() {
+  cleanup_tproxy_check
+  iptables -w 100 -t mangle -N "$tproxy_check_chain" >/dev/null 2>&1 || return 1
+
+  iptables -w 100 -t mangle -A "$tproxy_check_chain" -j MARK --set-mark 1 >/dev/null 2>&1 &&
+    iptables -w 100 -t mangle -A "$tproxy_check_chain" -p tcp -j TPROXY --on-ip 127.0.0.1 --on-port 65535 --tproxy-mark 1 >/dev/null 2>&1 &&
+    iptables -w 100 -t mangle -A "$tproxy_check_chain" -m owner --uid-owner 0 --gid-owner 3005 -j RETURN >/dev/null 2>&1 &&
+    iptables -w 100 -t mangle -A "$tproxy_check_chain" -m addrtype --dst-type LOCAL -j RETURN >/dev/null 2>&1
+  local result=$?
+
+  cleanup_tproxy_check
+  return "$result"
+}
+
+if [ "$BOOTMODE" != true ]; then
   abort "Error: Please install in KernelSU Manager"
 fi
 
-if [ "$KSU" = true ] && [ "$KSU_VER_CODE" -lt 10670 ] ; then
+if [ "$KSU" = true ] && [ "$KSU_VER_CODE" -lt 26000 ]; then
   abort "Error: Please update your KernelSU"
 fi
 
-if [ "$KSU" = true ] && [ "$KSU_VER_CODE" -lt 10683 ] ; then
-  service_dir="/data/adb/ksu/service.d"
-else
-  service_dir="/data/adb/service.d"
+for required_command in busybox ip iptables; do
+  require_command "$required_command"
+done
+check_busybox_applets
+
+if ! check_tproxy_support; then
+  abort "Error: This device does not provide the required TPROXY, MARK, owner UID/GID, or addrtype netfilter support"
+fi
+ui_print "- TProxy command and netfilter support verified"
+
+service_dir="/data/adb/service.d"
+
+if [ ! -d "$service_dir" ]; then
+  mkdir -p "$service_dir"
 fi
 
-if [ ! -d "$service_dir" ] ; then
-    mkdir -p $service_dir
-fi
+unzip -qo "${ZIPFILE}" -x 'META-INF/*' -d "$MODPATH"
 
-unzip -qo "${ZIPFILE}" -x 'META-INF/*' -d $MODPATH
-
-if [ -d /data/adb/box ] ; then
-  [ -x /data/adb/box/scripts/box.service ] && /data/adb/box/scripts/box.service stop > /dev/null 2>&1
-
-  old_core_user_group="$(grep -E '^[[:space:]]*CORE_USER_GROUP=' /data/adb/box/scripts/box.config 2> /dev/null | tail -n 1 | sed 's/^[[:space:]]*//')"
-
-  cp /data/adb/box/scripts/box.config /data/adb/box/scripts/box.config.bak 2> /dev/null
-  ui_print "- Old box.config backed up to box.config.bak"
-
-  if [ -n "${old_core_user_group}" ]; then
-    sed -i "s/^CORE_USER_GROUP=.*/${old_core_user_group}/" "$MODPATH/box/scripts/box.config"
-    ui_print "- CORE_USER_GROUP migrated: ${old_core_user_group}"
-  fi
-
-  cp -f $MODPATH/box/scripts/* /data/adb/box/scripts/
-  rm -rf $MODPATH/box
-else
-  mv $MODPATH/box /data/adb/
-fi
-
+mv "$MODPATH/box" /data/adb/
 mkdir -p /data/adb/box/bin/
 mkdir -p /data/adb/box/run/
 
-mv -f $MODPATH/mbox_service.sh $service_dir/
+mv -f "$MODPATH/mbox_service.sh" "$service_dir/"
 
-rm -f customize.sh
+rm -f "$MODPATH/customize.sh"
 
-set_perm_recursive $MODPATH 0 0 0755 0644
+set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm_recursive /data/adb/box/ 0 0 0755 0644
 set_perm_recursive /data/adb/box/scripts/ 0 0 0755 0700
 set_perm_recursive /data/adb/box/bin/ 0 0 0755 0700
 
-set_perm $service_dir/mbox_service.sh 0 0 0700
+set_perm "$service_dir/mbox_service.sh" 0 0 0700
 
-# fix "set_perm_recursive /data/adb/box/scripts" not working on some phones.
 chmod ugo+x /data/adb/box/scripts/*
-
-for pid in $(pidof inotifyd 2> /dev/null); do
-  if grep -q "box\\.inotify" "/proc/${pid}/cmdline" 2> /dev/null; then
-    kill "${pid}" 2> /dev/null
-  fi
-done
-
-inotifyd "/data/adb/box/scripts/box.inotify" "$MODPATH" > /dev/null 2>&1 &

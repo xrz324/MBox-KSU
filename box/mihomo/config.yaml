@@ -1,390 +1,246 @@
-ipv6: false
 mode: rule
+ipv6: false
 allow-lan: false
+tproxy-port: 1536
 log-level: silent
 unified-delay: true
 tcp-concurrent: true
 find-process-mode: always
-external-ui: "./web/"
-external-ui-url: "https://github.com/Zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip"
+profile:
+  store-fake-ip: true
+  store-selected: true
+
+#### WebUI ####
+secret: "MihomoKSU"
+external-ui: ./web/
 external-controller: 127.0.0.1:9090
+external-ui-url: "https://github.com/Zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip"
 
-# —————————
-
+#### Providers ####
 p: &p
-  {health-check: {enable: false, url: https://cp.cloudflare.com, interval: 14400, lazy: true}}
+  proxy: 直连
+  health-check:
+    lazy: true
+    enable: false
+    interval: 1800
+    url: http://cp.cloudflare.com
 
 proxy-providers:
   Hosted:
     <<: *p
     type: file
-    path: ./proxies/Hosted.uri
+    path: ./providers/hosted
 
-  Provider:
+  Sub:
     <<: *p
     type: http
-    proxy: 订阅更新
-    interval: 86400
-    path: ./proxies/Provider.yaml
-    filter: "^(?!.*(套餐|重置|剩余|到期|网址)).*$"
+    path: ./providers/sub
+    filter: "^(?!.*(Expire|GB|Reset)).*$"
+    url: "***"
 
-Auto: &Auto
-  type: url-test
-  tolerance: 50
-  use:
-  - Provider
-
-Man: &Man
+man: &man
   type: select
   use:
-  - Provider
+    - Sub
 
-Min: &Min
+min: &min
   type: select
   use:
-  - Hosted
+    - Hosted
 
-# —————————
-
-profile:
-  store-selected: true
-  store-fake-ip: true
-
-hosts:
-  mtalk.google.com: 108.177.125.188
-  alt1-mtalk.google.com: [209.85.144.188, 192.178.131.188]
-  alt2-mtalk.google.com: [209.85.144.188, 192.178.131.188]
-  alt3-mtalk.google.com: [209.85.144.188, 192.178.131.188]
-  alt4-mtalk.google.com: [209.85.144.188, 192.178.131.188]
-  alt5-mtalk.google.com: [209.85.144.188, 192.178.131.188]
-  alt6-mtalk.google.com: [209.85.144.188, 192.178.131.188]
-
-# —————————
-
-# Sniffer
-sniffer:
-  enable: true
-  parse-pure-ip: true
-  override-destination: true
-  sniff:
-    HTTP:
-      ports: [80, 8080-8880]
-    TLS:
-      ports: [443, 5228, 8443]
-    QUIC:
-      ports: [443, 8443]
-
-# TUN
+#### Tun ####
 tun:
-  enable: true
-  device: Mihomo
+  enable: false
   stack: system
+  device: mihomo
   dns-hijack:
     - any:53
     - tcp://any:53
   gso: true
   auto-route: true
   strict-route: true
-  auto-redirect: false
+  auto-redirect: true
   auto-detect-interface: true
+  disable-icmp-forwarding: true
   exclude-package:
     - org.localsend.localsend_app
 
-# DNS
-dns:
+#### Sniff ####
+sniffer:
   enable: true
+  parse-pure-ip: true
+  override-destination: true
+  sniff:
+    HTTP:
+      ports: [80, 8080]
+    TLS:
+      ports: [443, 5228]
+  skip-domain:
+    - "+.amemv.com"
+    - "+.douyinvod.com"
+    - "+.douyinpic.com"
+    - "+.huoshanimg.com"
+    - "+.douyinstatic.com"
+
+#### DNS ####
+dns:
   ipv6: false
-  # use-hosts: false
+  enable: true
   listen: 127.0.0.1:1053
-  cache-algorithm: arc
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
-  # fake-ip-range6: fdfe:dcba:9876::1/64
   fake-ip-filter-mode: blacklist
   fake-ip-filter:
-    - "+.lan"
-    - "+.local"
-    - '+.localhost'
-  nameserver-policy:
-    "RULE-SET:CN,Private":
-      - https://223.5.5.5/dns-query#直连
-      - https://223.6.6.6/dns-query#直连
+    - "rule-set:private"
+    - "rule-set:ban-ads"
+    - "rule-set:ban-ad"
   nameserver:
-    - https://1.1.1.1/dns-query#DNS
-    - https://8.8.8.8/dns-query#DNS
+    - tcp://1.1.1.1#DNS
   default-nameserver:
-    - https://223.5.5.5/dns-query#直连
-    - https://223.6.6.6/dns-query#直连
-  direct-nameserver:
-    - https://223.5.5.5/dns-query#直连
-    - https://223.6.6.6/dns-query#直连
+    - udp://223.5.5.5#直连
   proxy-server-nameserver:
-    - https://223.5.5.5/dns-query#直连
-    - https://223.6.6.6/dns-query#直连
+    - quic://223.5.5.5#直连
+  direct-nameserver:
+    - quic://223.5.5.5#直连
+  direct-nameserver-follow-policy: true
+  nameserver-policy:
+    "rule-set:ban-ads,ban-ad":
+      - rcode://name_error
 
-# —————————
-
+#### Proxies ####
 proxies:
-  - {name: 直连, type: direct, udp: true}
-  - {name: 屏蔽, type: reject}
+  - { name: 直连, type: direct, udp: true }
+  - { name: 屏蔽, type: reject }
+  - { name: DNS-IN, type: dns }
 
-Proxy_man: &Proxy_man
-    type: select
-    proxies:
-      - 全局
-      - 下载
-      - 香港
-      - 台湾
-      - 新加坡
-      - 日本
-      - 美国
-      - 其他
-      - 直连
-      - 屏蔽
+cn_man: &cn_man
+  type: select
+  proxies:
+    - 直连
+    - 默认
+    - 香港
+    - 台湾
+    - 新加坡
+    - 美国
+    - 日本
+    - 备用
 
-CN_man: &CN_man
-    type: select
-    proxies:
-      - 直连
-      - 全局
-      - 下载
-      - 香港
-      - 台湾
-      - 新加坡
-      - 日本
-      - 美国
-      - 其他
-      - 屏蔽
-
-Proxy_hid: &Proxy_hid
-    hidden: true
-    type: select
-    proxies:
-      - 全局
-
-Proxy_upg: &Proxy_upg
-    hidden: true
-    type: select
-    proxies:
-      - 下载
-
-Proxy_gen: &Proxy_gen
-    type: select
-    proxies:
-      - 全局
-      - 直连
-
-CN_gen: &CN_gen
-    type: select
-    proxies:
-      - 直连
-      - 全局
-
-# —————————
+proxy_gen: &proxy_gen
+  type: select
+  proxies:
+    - 默认
+    - 直连
 
 proxy-groups:
-  - name: 全局
+  - name: 默认
     type: select
     proxies:
       - 香港
       - 台湾
       - 新加坡
-      - 日本
       - 美国
-      - 下载
-      - 其他
+      - 日本
+      - 备用
       - 直连
 
   - name: 香港
-    filter: "^(?=.*(香港)).*$"
-#    <<: *Auto
-    <<: *Man
+    filter: "^(?=.*(Hong)).*$"
+    <<: *man
 
   - name: 台湾
-    filter: "^(?=.*(台湾)).*$"
-#    <<: *Auto
-    <<: *Man
-
-  - name: 日本
-    filter: "^(?=.*(日本)).*$"
-#    <<: *Auto
-    <<: *Man
-
-  - name: 美国
-    filter: "^(?=.*(美国)).*$"
-#    <<: *Auto
-    <<: *Man
+    filter: "^(?=.*(Taiwan)).*$"
+    <<: *man
 
   - name: 新加坡
-    filter: "^(?=.*(新加坡)).*$"
-#    <<: *Auto
-    <<: *Man
+    filter: "^(?=.*(Singapore)).*$"
+    <<: *man
 
-  - name: 其他
-    filter: "^(?!.*(香港|日本|美国|台湾|新加坡)).*$"
-#    <<: *Auto
-    <<: *Man
+  - name: 美国
+    filter: "^(?=.*(United)).*$"
+    <<: *man
 
-  - name: 下载
-    <<: *Min
+  - name: 日本
+    filter: "^(?=.*(Japan)).*$"
+    <<: *man
 
-# —————————
+  - name: 备用
+    <<: *min
 
-  - name: Douyin
-    <<: *CN_man
+  #### Groups ####
+  - name: DNS-OUT
+    type: select
+    hidden: true
+    proxies:
+      - 默认
 
-  - name: BiliBili
-    <<: *CN_gen
-
-  - name: GitHub
-    <<: *Proxy_man
-
-  - name: Google
-    <<: *Proxy_man
-
-  - name: Microsoft
-    <<: *CN_man
-
-  - name: GoogleFCM
-    <<: *Proxy_gen
-
-  - name: DNS
-    <<: *Proxy_hid
-
-  - name: 订阅更新
-    <<: *Proxy_upg
-
-  - name: 漏网之鱼
-    <<: *Proxy_gen
-
-# —————————
-
+#### RuleSets ####
 rule-anchor:
-  Local: &Local
-    {type: file, behavior: classical, format: text}
-  IPCIDR: &IPCIDR
-    {type: http, behavior: ipcidr, format: mrs, interval: 86400}
-  Domain: &Domain
-    {type: http, behavior: domain, format: mrs, interval: 86400}
-  YamlSet: &YamlSet
-    {type: http, behavior: classical, format: yaml, interval: 86400}
-
-# —————————
+  user: &user { type: file, behavior: classical, format: text }
+  yaml: &yaml { type: http, behavior: classical, format: yaml, proxy: 默认 }
+  domain: &domain { type: http, behavior: domain, format: mrs, proxy: 默认 }
+  ipcidr: &ipcidr { type: http, behavior: ipcidr, format: mrs, proxy: 默认 }
 
 rule-providers:
-  追加代理:
-    <<: *Local
-    path: ./etc/proxy.list
+  blocked:
+    <<: *user
+    path: ./custom/blocked.list
+  bypass:
+    <<: *user
+    path: ./custom/bypass.list
 
-  追加屏蔽:
-    <<: *Local
-    path: ./etc/block.list
-
-  追加绕过:
-    <<: *Local
-    path: ./etc/bypass.list
-
-  CN:
-    <<: *Domain
-    path: ./rules/CN.mrs
+  cn:
+    <<: *domain
+    path: ./rules/domain/cn.mrs
     url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs"
-  CNIP:
-    <<: *IPCIDR
-    path: ./rules/CNIP.mrs
+  cn-ip:
+    <<: *ipcidr
+    path: ./rules/ipcidr/cn.mrs
     url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cn.mrs"
 
-  Ban-ad:
-    <<: *Domain
-    path: ./rules/Ban-ad.mrs
+  ban-ad:
+    <<: *domain
+    path: ./rules/domain/ban-ad.mrs
     url: "https://raw.githubusercontent.com/Xrz324/AdRules/main/adrules-mihomo.mrs"
-  Ban-ads:
-    <<: *YamlSet
-    path: ./rules/Ban-ads.yaml
+  ban-ads:
+    <<: *yaml
+    path: ./rules/yaml/ban-ads.yaml
     url: "https://raw.githubusercontent.com/Xrz324/AdRules/main/adrules-mihomo.yaml"
 
-  DouYin:
-    <<: *Domain
-    path: ./rules/DouYin.mrs
-    url: "https://raw.githubusercontent.com/GitMetaio/rule/master/rule/Clash/DouYin/DouYin_OCD_Domain.mrs"
-
-  BiliBili:
-    <<: *Domain
-    path: ./rules/BiliBili.mrs
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/bilibili.mrs"
-  BiliIntl:
-    <<: *Domain
-    path: ./rules/BiliIntl.mrs
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/biliintl.mrs"
-
-  Google:
-    <<: *Domain
-    path: ./rules/Google.mrs
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/google.mrs"
-
-  GoogleFCM:
-    <<: *Domain
-    path: ./rules/GoogleFCM.mrs
-    url: "https://raw.githubusercontent.com/GitMetaio/rule/master/rule/Clash/GoogleFCM/GoogleFCM_OCD_Domain.mrs"
-  GoogleFCMIP:
-    <<: *IPCIDR
-    path: ./rules/GoogleFCMIP.mrs
-    url: "https://raw.githubusercontent.com/GitMetaio/rule/master/rule/Clash/GoogleFCM/GoogleFCM_OCD_IP.mrs"
-
-  Microsoft:
-    <<: *Domain
-    path: ./rules/Microsoft.mrs
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/microsoft.mrs"
-
-  GitHub:
-    <<: *Domain
-    path: ./rules/GitHub.mrs
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/github.mrs"
-
-  Private:
-    <<: *Domain
-    path: ./rules/Private.mrs
+  private:
+    <<: *domain
+    path: ./rules/domain/private.mrs
     url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.mrs"
-  PrivateIP:
-    <<: *IPCIDR
-    path: ./rules/PrivateIP.mrs
+  private-ip:
+    <<: *ipcidr
+    path: ./rules/ipcidr/private.mrs
     url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/private.mrs"
 
-# —————————
-
+#### Rules ####
 rules:
-  # Avoid DNS Bypass
+  # DNS Handle
+  - DST-PORT,53,DNS-IN
   - DST-PORT,853,屏蔽
 
+  # Ban QUIC
+  - AND,((NETWORK,udp),(DST-PORT,443)),屏蔽
+
+  # Blocking Rules
+  - RULE-SET,ban-ads,屏蔽,no-resolve
+  - RULE-SET,ban-ad,屏蔽,no-resolve
+  - RULE-SET,blocked,屏蔽,no-resolve
+
+  # Addon Rules
+  - RULE-SET,bypass,直连,no-resolve
+  # - PROCESS-NAME,example.app,直连
+  # - UID,10123,直连
+
   # Domain Rules
-  - RULE-SET,Ban-ads,屏蔽,no-resolve
-  - RULE-SET,Ban-ad,屏蔽
-  - RULE-SET,追加屏蔽,屏蔽
-  - RULE-SET,追加代理,全局
-  - RULE-SET,追加绕过,直连
-  - RULE-SET,Private,直连
-  - RULE-SET,GitHub,GitHub
-  - RULE-SET,DouYin,Douyin
-  - RULE-SET,BiliBili,BiliBili
-  - RULE-SET,BiliIntl,BiliBili
-  - RULE-SET,GoogleFCM,GoogleFCM
-  - RULE-SET,Microsoft,Microsoft
-  - RULE-SET,Google,Google
-  - RULE-SET,CN,直连
+  - RULE-SET,private,直连
+  - RULE-SET,cn,直连
 
   # IP Rules
-  - RULE-SET,GoogleFCMIP,GoogleFCM,no-resolve
-  - RULE-SET,PrivateIP,直连,no-resolve
-  - RULE-SET,CNIP,直连
-
-  # Process Rules
-  - PROCESS-PATH,com.example.piliplus,BiliBili
-  - PROCESS-PATH,com.ss.android.ugc.aweme,Douyin
-  - PROCESS-PATH,com.ss.android.ugc.aweme.mobile,Douyin
-  - PROCESS-PATH,com.android.vending,Google
-  - PROCESS-PATH,com.google.android.gms,Google
-  - PROCESS-PATH,com.google.android.gsf,Google
-  - PROCESS-PATH,com.google.android.apps.photos,Google
-  - PROCESS-PATH,com.google.android.apps.youtube.music,Google
+  - RULE-SET,private-ip,直连
+  - RULE-SET,cn-ip,直连
 
   # Missing Handle
-  - MATCH,漏网之鱼
+  - MATCH,默认
