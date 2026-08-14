@@ -2,17 +2,11 @@
 
 export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
 
-module_dir="/data/adb/modules/mbox"
-
-[ -n "$(magisk -v 2> /dev/null | grep lite)" ] && module_dir=/data/adb/lite_modules/mbox
-
 scripts_dir="/data/adb/box/scripts"
 
 (
-  until [ "$(getprop sys.boot_completed 2> /dev/null)" = "1" ]; do
+  until [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; do
     sleep 3
   done
   "${scripts_dir}/start.sh"
-)&
-
-busybox inotifyd "${scripts_dir}/box.inotify" "${module_dir}" > /dev/null 2>&1 &
+) &

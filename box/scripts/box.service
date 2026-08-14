@@ -14,11 +14,14 @@ core_dir="${box_path}/${bin_name}"
 bin_path="${box_path}/bin/${bin_name}"
 pid_file="${run_path}/${bin_name}.pid"
 tproxy_path="${scripts_dir}/box.tproxy"
-active_mode_file="${run_path}/proxy_mode"
+ipv6_path="${scripts_dir}/box.ipv6"
+dns_path="${scripts_dir}/box.dns"
 
 CORE_USER_GROUP="${CORE_USER_GROUP:-root:net_admin}"
 PROXY_HOTSPOT="${PROXY_HOTSPOT:-1}"
 PROXY_MODE="${PROXY_MODE:-tproxy}"
+TPROXY_PORT="${TPROXY_PORT:-1536}"
+DNS_PORT="${DNS_PORT:-1053}"
 tun_device="${tun_device:-mihomo}"
 
 mkdir -p "${run_path}"
@@ -90,24 +93,50 @@ start_bin() {
   return 1
 }
 
+probe_port() {
+  local protocol="$1"
+  local port="$2"
+  local option
+
+  case "${protocol}" in
+  tcp) option="-lnt" ;;
+  udp) option="-lnu" ;;
+  *) return 1 ;;
+  esac
+
+  ss -H "${option}" 2>/dev/null | busybox awk -v port="${port}" '
+    $4 ~ (":" port "$") { found = 1 }
+    END { exit !found }
+  '
+}
+
+probe_tproxy_ports() {
+  probe_port tcp "${TPROXY_PORT}" &&
+    probe_port udp "${TPROXY_PORT}" &&
+    probe_port tcp "${DNS_PORT}" &&
+    probe_port udp "${DNS_PORT}"
+}
+
+probe_tun_device() {
+  ip link show "${tun_device}" >/dev/null 2>&1
+}
+
+proxy_is_ready() {
+  case "${PROXY_MODE}" in
+  tproxy) probe_tproxy_ports ;;
+  tun) probe_tun_device ;;
+  *) return 1 ;;
+  esac
+}
+
 wait_bin_ready() {
-  local wait_count=0
-  local bin_pid
+  local attempts=0
 
-  if [ "${PROXY_MODE}" = "tproxy" ]; then
+  while [ "${attempts}" -lt 100 ]; do
+    get_pid >/dev/null 2>&1 || return 1
+    proxy_is_ready && return 0
+    attempts=$((attempts + 1))
     sleep 1
-    get_pid >/dev/null 2>&1
-    return $?
-  fi
-
-  while [ "${wait_count}" -lt 100 ]; do
-    bin_pid=$(get_pid 2>/dev/null || true)
-    [ -n "${bin_pid}" ] || return 1
-
-    probe_tun_device && return 0
-
-    sleep 1
-    wait_count=$((wait_count + 1))
   done
 
   return 1
@@ -144,19 +173,17 @@ display_bin_usage() {
 }
 
 start_service() {
-  if check_permission; then
-    if start_bin && wait_bin_ready; then
-      log Info "${bin_name} service is running. ( PID: $(cat "${pid_file}") )"
-      return 0
-    fi
+  local bin_pid
 
-    if get_pid >/dev/null 2>&1; then
-      log Warn "${bin_name} service is running but may not listening."
+  if check_permission; then
+    if start_bin && wait_bin_ready && bin_pid=$(get_pid 2>/dev/null); then
+      printf "%s" "${bin_pid}" >"${pid_file}"
+      log Info "${bin_name} service is running. ( PID: ${bin_pid} )"
       return 0
     fi
 
     log Error "start ${bin_name} service failed, please check ${run_path}/error_${bin_name}.log."
-    rm -f "${pid_file}" >/dev/null 2>&1 || true
+    stop_service
     return 1
   fi
 
@@ -178,10 +205,6 @@ stop_service() {
   rm -f "${pid_file}" >/dev/null 2>&1 || true
 }
 
-probe_tun_device() {
-  ip link show "${tun_device}" >/dev/null 2>&1
-}
-
 tun_ip_rules() {
   ip rule "$1" from all iif "${tun_device}" lookup main suppress_prefixlength 0 pref 8000
   ip rule "$1" lookup main pref 9005
@@ -194,16 +217,14 @@ tun_forward_iptables_rules() {
 
 tun_forward_enable() {
   tun_forward_disable
-  sleep 1
 
   echo 1 >/proc/sys/net/ipv4/ip_forward
   echo 2 >/proc/sys/net/ipv4/conf/default/rp_filter
   echo 2 >/proc/sys/net/ipv4/conf/all/rp_filter
 
-  if probe_tun_device; then
-    tun_forward_iptables_rules "-I" && tun_ip_rules "add" && log Info "tun hotspot support is enabled."
-  fi
-  return 0
+  probe_tun_device || return 1
+  tun_forward_iptables_rules "-I" && tun_ip_rules "add" &&
+    log Info "tun hotspot support is enabled."
 }
 
 tun_forward_disable() {
@@ -213,14 +234,8 @@ tun_forward_disable() {
 }
 
 start_proxy() {
-  if [ -f "${active_mode_file}" ]; then
-    stop_proxy >/dev/null 2>&1
-  fi
-
   case "${PROXY_MODE}" in
-  tproxy)
-    "${tproxy_path}" start || return 1
-    ;;
+  tproxy) ;;
   tun)
     if [ "${PROXY_HOTSPOT}" = "1" ]; then
       tun_forward_enable || return 1
@@ -231,28 +246,36 @@ start_proxy() {
     return 1
     ;;
   esac
-
-  printf "%s" "${PROXY_MODE}" >"${active_mode_file}"
 }
 
-stop_proxy() {
-  local active_mode
-
-  active_mode=$(cat "${active_mode_file}" 2>/dev/null || printf "%s" "${PROXY_MODE}")
-  case "${active_mode}" in
-  tproxy) "${tproxy_path}" stop ;;
-  tun) tun_forward_disable ;;
+prepare_proxy() {
+  case "${PROXY_MODE}" in
+  tproxy)
+    "${tproxy_path}" start
+    ;;
+  tun)
+    "${dns_path}" start && "${ipv6_path}" start
+    ;;
   *)
-    "${tproxy_path}" stop >/dev/null 2>&1 || true
-    tun_forward_disable >/dev/null 2>&1 || true
+    log Error "invalid PROXY_MODE: ${PROXY_MODE}; expected tproxy or tun."
+    return 1
     ;;
   esac
-  rm -f "${active_mode_file}" >/dev/null 2>&1 || true
 }
 
 case "$1" in
 start)
-  if display_bin_status || start_service; then
+  if ! prepare_proxy; then
+    exit 1
+  elif display_bin_status; then
+    if ! wait_bin_ready; then
+      log Error "${PROXY_MODE} endpoint did not become ready."
+      exit 1
+    elif ! start_proxy; then
+      stop_service
+      exit 1
+    fi
+  elif start_service; then
     if ! start_proxy; then
       log Error "failed to enable ${PROXY_MODE} proxy mode."
       stop_service
@@ -262,28 +285,27 @@ start)
     exit $?
   fi
   ;;
-stop)
-  stop_proxy
-  stop_service
-  ;;
-restart)
-  stop_proxy
-  stop_service
-  sleep 2
-  if start_service; then
-    start_proxy || {
-      stop_service
-      exit 1
-    }
-  else
-    exit $?
-  fi
-  ;;
 status)
-  display_bin_status && display_bin_usage
+  status_result=0
+  if display_bin_status; then
+    display_bin_usage || true
+    if ! proxy_is_ready; then
+      log Warn "${PROXY_MODE} endpoint is not ready."
+      status_result=1
+    fi
+  else
+    status_result=1
+  fi
+  if [ "${PROXY_MODE}" = "tproxy" ]; then
+    "${tproxy_path}" status || status_result=1
+  else
+    "${ipv6_path}" status || status_result=1
+    "${dns_path}" status || status_result=1
+  fi
+  exit "${status_result}"
   ;;
 *)
-  log Error "$0 $1 usage: $0 {start|stop|restart|status}"
+  log Error "$0 $1 usage: $0 {start|status}"
   exit 2
   ;;
 esac

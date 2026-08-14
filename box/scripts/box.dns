@@ -1,0 +1,182 @@
+#!/system/bin/sh
+
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
+
+scripts_dir=$(dirname "$0")
+
+CONFIG_FILE="${scripts_dir}/box.config"
+[ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
+
+DNS_PORT="${DNS_PORT:-1053}"
+PROXY_HOTSPOT="${PROXY_HOTSPOT:-0}"
+HOTSPOT_INTERFACE="${HOTSPOT_INTERFACE-wlan1 ap0}"
+
+readonly MBOX_DNS_INPUT_CHAIN="MBOX_DNS_INPUT"
+
+log() {
+  local level="$1"
+  local message="$2"
+  local timestamp
+
+  export TZ=Asia/Shanghai
+  timestamp="$(date +"%Y-%m-%d %H:%M:%S")"
+  printf "%s [%s]: %s\n" "${timestamp}" "${level}" "${message}" >&2
+}
+
+ipt() {
+  iptables -w 100 "$@"
+}
+
+is_uint() {
+  case "$1" in
+  '' | *[!0-9]*) return 1 ;;
+  *) return 0 ;;
+  esac
+}
+
+in_range() {
+  is_uint "$1" && [ "${#1}" -le 9 ] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+
+validate_config() {
+  local hotspot_interface
+  local hotspot_interface_count=0
+
+  if ! in_range "${DNS_PORT}" 1 65535; then
+    log Error "invalid DNS_PORT: ${DNS_PORT}; expected 1-65535."
+    return 1
+  fi
+
+  for hotspot_interface in ${HOTSPOT_INTERFACE}; do
+    hotspot_interface_count=$((hotspot_interface_count + 1))
+    case "${hotspot_interface}" in
+    *[!a-zA-Z0-9_.:+-]* | -* | +* | *+?*)
+      log Error "invalid hotspot interface: ${hotspot_interface}"
+      return 1
+      ;;
+    esac
+  done
+
+  case "${PROXY_HOTSPOT}" in
+  0) ;;
+  1) [ "${hotspot_interface_count}" -gt 0 ] || return 1 ;;
+  *)
+    log Error "invalid PROXY_HOTSPOT: ${PROXY_HOTSPOT}"
+    return 1
+    ;;
+  esac
+}
+
+delete_hooks() {
+  while ipt -t filter -D INPUT -p tcp --dport "${DNS_PORT}" \
+    -j "${MBOX_DNS_INPUT_CHAIN}" >/dev/null 2>&1; do :; done
+  while ipt -t filter -D INPUT -p udp --dport "${DNS_PORT}" \
+    -j "${MBOX_DNS_INPUT_CHAIN}" >/dev/null 2>&1; do :; done
+}
+
+delete_chain() {
+  ipt -t filter -F "${MBOX_DNS_INPUT_CHAIN}" >/dev/null 2>&1 || true
+  ipt -t filter -X "${MBOX_DNS_INPUT_CHAIN}" >/dev/null 2>&1 || true
+}
+
+setup_rules() {
+  local hotspot_interface
+
+  validate_config || return 1
+  delete_hooks
+  delete_chain
+
+  if ! ipt -t filter -N "${MBOX_DNS_INPUT_CHAIN}" ||
+    ! ipt -t filter -A "${MBOX_DNS_INPUT_CHAIN}" -i lo -j ACCEPT; then
+    delete_chain
+    log Error "cannot create DNS input filter chain."
+    return 1
+  fi
+
+  if [ "${PROXY_HOTSPOT}" = "1" ]; then
+    for hotspot_interface in ${HOTSPOT_INTERFACE}; do
+      if ! ipt -t filter -A "${MBOX_DNS_INPUT_CHAIN}" \
+        -i "${hotspot_interface}" -j ACCEPT; then
+        delete_chain
+        log Error "cannot allow DNS access from ${hotspot_interface}."
+        return 1
+      fi
+    done
+  fi
+  if ! ipt -t filter -A "${MBOX_DNS_INPUT_CHAIN}" -p tcp -j DROP ||
+    ! ipt -t filter -A "${MBOX_DNS_INPUT_CHAIN}" -p udp -j DROP; then
+    delete_chain
+    log Error "cannot complete the DNS input filter chain."
+    return 1
+  fi
+
+  if ! ipt -t filter -I INPUT 1 -p tcp --dport "${DNS_PORT}" \
+    -j "${MBOX_DNS_INPUT_CHAIN}" ||
+    ! ipt -t filter -I INPUT 1 -p udp --dport "${DNS_PORT}" \
+      -j "${MBOX_DNS_INPUT_CHAIN}"; then
+    delete_hooks
+    delete_chain
+    log Error "cannot protect the Mihomo DNS listener."
+    return 1
+  fi
+
+  log Info "Mihomo DNS port ${DNS_PORT} is restricted to local and hotspot traffic."
+}
+
+check_rules() {
+  local hotspot_interface
+  local protocol
+  local missing=0
+
+  if ! ipt -t filter -L "${MBOX_DNS_INPUT_CHAIN}" -n >/dev/null 2>&1; then
+    log Warn "missing DNS input filter chain: ${MBOX_DNS_INPUT_CHAIN}"
+    return 1
+  fi
+
+  if ! ipt -t filter -C "${MBOX_DNS_INPUT_CHAIN}" -i lo -j ACCEPT >/dev/null 2>&1; then
+    log Warn "missing loopback access to the Mihomo DNS listener."
+    missing=1
+  fi
+  if [ "${PROXY_HOTSPOT}" = "1" ]; then
+    for hotspot_interface in ${HOTSPOT_INTERFACE}; do
+      if ! ipt -t filter -C "${MBOX_DNS_INPUT_CHAIN}" \
+        -i "${hotspot_interface}" -j ACCEPT >/dev/null 2>&1; then
+        log Warn "missing DNS access for hotspot interface ${hotspot_interface}."
+        missing=1
+      fi
+    done
+  fi
+
+  for protocol in tcp udp; do
+    if ! ipt -t filter -C INPUT -p "${protocol}" --dport "${DNS_PORT}" \
+      -j "${MBOX_DNS_INPUT_CHAIN}" >/dev/null 2>&1; then
+      log Warn "missing DNS input filter hook for ${protocol}."
+      missing=1
+    fi
+    if ! ipt -t filter -C "${MBOX_DNS_INPUT_CHAIN}" \
+      -p "${protocol}" -j DROP >/dev/null 2>&1; then
+      log Warn "missing DNS input drop rule for ${protocol}."
+      missing=1
+    fi
+  done
+
+  return "${missing}"
+}
+
+case "$1" in
+start)
+  setup_rules
+  ;;
+status)
+  if check_rules; then
+    log Info "Mihomo DNS listener access is restricted."
+  else
+    log Warn "Mihomo DNS listener access rules are incomplete."
+    exit 1
+  fi
+  ;;
+*)
+  log Error "usage: $0 {start|status}"
+  exit 2
+  ;;
+esac

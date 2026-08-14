@@ -2,7 +2,9 @@
 
 module_dir="/data/adb/modules/mbox"
 
-[ -n "$(magisk -v 2>/dev/null | grep lite)" ] && module_dir=/data/adb/lite_modules/mbox
+if magisk -v 2>/dev/null | grep -q lite; then
+  module_dir=/data/adb/lite_modules/mbox
+fi
 
 scripts_dir=$(dirname "$0")
 
@@ -11,15 +13,16 @@ box_path="/data/adb/box"
 run_path="${box_path}/run"
 pid_file="${run_path}/${bin_name}.pid"
 
-rm -f "${pid_file}"
 mkdir -p "${run_path}"
+
+# Runtime process identities live on /data, while their processes do not
+# survive a reboot. Discard the previous boot's identities before starting.
+rm -f "${pid_file}" \
+  "${run_path}/ipv6_monitor.runtime" \
+  "${run_path}/ipv6_monitor.fifo" >/dev/null 2>&1 || true
 
 if [ ! -f "${module_dir}/disable" ]; then
   : >"${run_path}/run.log"
-
-  if ! ip -6 rule show 2>/dev/null | grep -q '^1:.*unreachable'; then
-    ip -6 rule add unreachable pref 1 >/dev/null 2>&1 || true
-  fi
 
   "${scripts_dir}/box.service" start >>/dev/null 2>>"${run_path}/run.log"
 fi

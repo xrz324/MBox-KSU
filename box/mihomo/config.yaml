@@ -86,7 +86,7 @@ sniffer:
 dns:
   ipv6: false
   enable: true
-  listen: 127.0.0.1:1053
+  listen: 0.0.0.0:1053
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter-mode: blacklist
@@ -95,7 +95,7 @@ dns:
     - "rule-set:ban-ads"
     - "rule-set:ban-ad"
   nameserver:
-    - tcp://1.1.1.1#DNS
+    - tcp://1.1.1.1#DNS-OUT
   default-nameserver:
     - udp://223.5.5.5#直连
   proxy-server-nameserver:
