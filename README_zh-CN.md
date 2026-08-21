@@ -1,6 +1,6 @@
 # Mihomo Box
 
-[English](README.md) | [简体中文](README_zh-CN.md)
+[English](README.md) | 简体中文
 
 本模块用于在 Android 设备上启动 **Mihomo**，通过 **TProxy** 或 **TUN** 接管设备流量。TProxy 实现额外支持热点代理和 DNS 53 端口劫持。
 

@@ -1,6 +1,6 @@
 # Mihomo Box
 
-[English](README.md) | [简体中文](README_zh-CN.md)
+English | [简体中文](README_zh-CN.md)
 
 This module runs **Mihomo** on Android devices and routes device traffic through
 either **TProxy** or **TUN**. The TProxy implementation additionally supports
