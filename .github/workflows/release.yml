@@ -1,25 +1,95 @@
-name: release
-
-permissions:
-  contents: write
+name: Release
 
 on:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build:
+  release:
+    name: Package and release
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out repository
+        uses: actions/checkout@v7
 
-      - name: Run build.sh
-        run: sh build.sh
+      - name: Validate module
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f module.prop
+          test -f customize.sh
+          test -d box
+          sh -n \
+            customize.sh \
+            uninstall.sh \
+            mbox_service.sh \
+            box/scripts/box.config \
+            box/scripts/box.dns \
+            box/scripts/box.ipv6 \
+            box/scripts/box.service \
+            box/scripts/box.tproxy \
+            box/scripts/start.sh
 
-      - name: Build release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: mbox_v*.zip
+      - name: Package module
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_name="mbox-${GITHUB_REF_NAME}.zip"
+          artifact="${RUNNER_TEMP}/${artifact_name}"
+
+          chmod 0755 \
+            customize.sh \
+            uninstall.sh \
+            mbox_service.sh \
+            box/scripts/box.config \
+            box/scripts/box.dns \
+            box/scripts/box.ipv6 \
+            box/scripts/box.service \
+            box/scripts/box.tproxy \
+            box/scripts/start.sh
+
+          find . -type f \
+            ! -path './.git/*' \
+            ! -path './.github/*' \
+            ! -path './dist/*' \
+            ! -name '*.zip' \
+            ! -name 'README.md' \
+            ! -name 'README_zh-CN.md' \
+            -printf '%P\n' |
+            LC_ALL=C sort |
+            zip -9 "${artifact}" -@
+
+          entries="$(unzip -Z1 "${artifact}")"
+          grep -Fxq 'module.prop' <<<"${entries}"
+          grep -Fxq 'customize.sh' <<<"${entries}"
+          grep -Fxq 'box/scripts/start.sh' <<<"${entries}"
+          if grep -Eq '(^|/)(README(_zh-CN)?\.md|\.github)(/|$)' <<<"${entries}"; then
+            echo "Excluded files found in release archive" >&2
+            exit 1
+          fi
+          unzip -tqq "${artifact}"
+
+          echo "artifact=${artifact}" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT: ${{ steps.package.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" "${ARTIFACT}" \
+            --verify-tag \
+            --generate-notes \
+            --title "MBox ${GITHUB_REF_NAME}"
