@@ -1,5 +1,7 @@
 # Mihomo Box
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 English | [简体中文](README_zh-CN.md)
 
 This module runs **Mihomo** on Android devices and routes device traffic through
@@ -87,3 +89,7 @@ primary GID `net_admin`, without relying on a socket mark.
 
 - Uninstalling the module removes the service script but preserves the
   `/data/adb/box` data directory. Reboot the device after uninstalling.
+
+## License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE).

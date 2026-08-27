@@ -1,5 +1,7 @@
 # Mihomo Box
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 [English](README.md) | 简体中文
 
 本模块用于在 Android 设备上启动 **Mihomo**，通过 **TProxy** 或 **TUN** 接管设备流量。TProxy 实现额外支持热点代理和 DNS 53 端口劫持。
@@ -45,3 +47,7 @@ TProxy 标记设计参考 [Linux 内核透明代理文档](https://docs.kernel.o
 ## 卸载
 
 - 卸载模块会移除 service 脚本，但保留 `/data/adb/box` 数据目录；卸载后需重启设备。
+
+## 许可证
+
+本项目基于 [GNU General Public License v3.0](LICENSE) 发布。
