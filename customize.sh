@@ -57,11 +57,11 @@ check_tproxy_support() {
     return 1
   fi
 
-  iptables -w 100 -t mangle -A "$tproxy_check_chain" -j MARK --set-xmark 268435456/4294967295 >/dev/null 2>&1 &&
-    iptables -w 100 -t mangle -A "$tproxy_check_chain" -p tcp -j TPROXY --on-ip 127.0.0.1 --on-port 65535 --tproxy-mark 268435456/4294967295 >/dev/null 2>&1 &&
-    iptables -w 100 -t mangle -A "$tproxy_check_chain" -p udp -j TPROXY --on-ip 127.0.0.1 --on-port 65535 --tproxy-mark 268435456/4294967295 >/dev/null 2>&1 &&
+  iptables -w 100 -t mangle -A "$tproxy_check_chain" -j MARK --set-xmark 268435456/268435456 >/dev/null 2>&1 &&
+    iptables -w 100 -t mangle -A "$tproxy_check_chain" -p tcp -j TPROXY --on-ip 127.0.0.1 --on-port 65535 --tproxy-mark 268435456/268435456 >/dev/null 2>&1 &&
+    iptables -w 100 -t mangle -A "$tproxy_check_chain" -p udp -j TPROXY --on-ip 127.0.0.1 --on-port 65535 --tproxy-mark 268435456/268435456 >/dev/null 2>&1 &&
     iptables -w 100 -t mangle -A "$tproxy_check_chain" -m owner --uid-owner 0 --gid-owner 3005 -j RETURN >/dev/null 2>&1 &&
-    iptables -w 100 -t mangle -A "$tproxy_check_chain" -m mark --mark 268435456/4294967295 -j RETURN >/dev/null 2>&1 &&
+    iptables -w 100 -t mangle -A "$tproxy_check_chain" -m mark --mark 268435456/268435456 -j RETURN >/dev/null 2>&1 &&
     iptables -w 100 -t mangle -A "$tproxy_check_chain" -m addrtype --dst-type LOCAL -j RETURN >/dev/null 2>&1 &&
     iptables -w 100 -t mangle -A "$tproxy_check_chain" -m addrtype --dst-type BROADCAST -j RETURN >/dev/null 2>&1 &&
     iptables -w 100 -t nat -A "$tproxy_check_chain" -p tcp -j REDIRECT --to-ports 65535 >/dev/null 2>&1 &&

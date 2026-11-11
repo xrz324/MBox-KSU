@@ -19,8 +19,8 @@
 - Mihomo 配置：`/data/adb/box/mihomo/config.yaml`
 - 模块脚本配置：`/data/adb/box/scripts/box.config`
   - `CORE_USER_GROUP`：默认 `root:net_admin`。`xt_owner` 同时匹配 UID 和 socket 主 GID，因此其他仅附加 `net_admin` 组的进程不会旁路
-  - `TPROXY_RULE_PREF`：策略路由规则优先级，必须小于 `10000`，否则会排在 Android netd 规则之后导致 TProxy 失效
-  - `TPROXY_MARK`：TProxy 的高位路由签名。模块以 `0xffffffff` 全宽覆盖并匹配该 mark，不保留原字段
+  - `TPROXY_RULE_PREF`：必须小于 `10000`，确保路由规则优先于 Android netd
+  - `TPROXY_MARK`：使用 `2^21` 至 `2^28` 中的单个位，默认 `0x10000000`，保留其他 Android 标记
   - `DNS_PORT`：需与 `dns.listen` 中的端口一致；热点 DNS 重定向要求监听地址为 `0.0.0.0`
 - 状态检查命令：`/data/adb/box/scripts/box.service status`
 

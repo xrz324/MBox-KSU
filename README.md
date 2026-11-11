@@ -25,12 +25,9 @@ is rejected if any requirement is missing.
   - `CORE_USER_GROUP`: defaults to `root:net_admin`. Because `xt_owner`
     matches both the UID and the socket's primary GID, processes that only have
     `net_admin` as a supplementary group do not bypass the proxy.
-  - `TPROXY_RULE_PREF`: policy routing rule priority. It must be below
-    `10000`; otherwise, it is ordered after Android netd rules and TProxy does
-    not work.
-  - `TPROXY_MARK`: high-bit routing signature used by TProxy. The module
-    overwrites and matches the mark across the full `0xffffffff` mask without
-    preserving existing fields.
+  - `TPROXY_RULE_PREF`: must be below `10000` to precede Android netd rules.
+  - `TPROXY_MARK`: one routing bit from `2^21` through `2^28` (default
+    `0x10000000`), preserving other Android marks.
   - `DNS_PORT`: must match the port in `dns.listen`. Hotspot DNS redirection
     requires the listening address to be `0.0.0.0`.
 - Status command: `/data/adb/box/scripts/box.service status`

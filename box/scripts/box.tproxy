@@ -28,8 +28,10 @@ readonly MBOX_DNS_PREROUTING_CHAIN="MBOX_DNS_PREROUTING"
 # the TProxy rule must be evaluated before them.
 readonly NETD_RULE_PREF="10000"
 
-# TProxy owns the complete packet mark while this module is enabled. A full
-# mask prevents Android netId or future reserved bits from matching our route.
+# Only own the configured reserved bit. Android's netId, permissions, billing
+# and vendor marks must survive interception and must not affect our lookup.
+readonly TPROXY_MASK="${TPROXY_MARK}"
+# Recognize the old full-width signature when removing stale rules.
 readonly FULL_MARK_MASK="4294967295"
 
 # Local-use destinations bypass Mihomo. Documentation, benchmarking (including
@@ -104,10 +106,14 @@ validate_config() {
     return 1
   fi
 
-  # mksh arithmetic cannot safely validate the complete unsigned 32-bit
-  # range. Keep the configured high-bit signature within its signed range.
-  if ! in_range "${TPROXY_MARK}" 65536 2147483647; then
-    log Error "invalid TPROXY_MARK: ${TPROXY_MARK}; expected 65536-2147483647."
+  # AOSP reserves bits 21-28. Lower bits carry netd state; bits 29-31 are
+  # vendor/wakeup fields. Require a single bit so our mask owns no other state.
+  if ! in_range "${TPROXY_MARK}" 2097152 268435456; then
+    log Error "invalid TPROXY_MARK: ${TPROXY_MARK}; expected one reserved bit (2^21-2^28)."
+    return 1
+  fi
+  if [ "$((TPROXY_MARK & (TPROXY_MARK - 1)))" -ne 0 ]; then
+    log Error "TPROXY_MARK must contain exactly one reserved bit."
     return 1
   fi
 
@@ -178,7 +184,7 @@ tproxy_to_core() {
 
   ipt -t mangle -A "${chain}" "$@" -j TPROXY \
     --on-ip 127.0.0.1 --on-port "${TPROXY_PORT}" \
-    --tproxy-mark "${TPROXY_MARK}/${FULL_MARK_MASK}"
+    --tproxy-mark "${TPROXY_MARK}/${TPROXY_MASK}"
 }
 
 delete_hooks() {
@@ -238,7 +244,7 @@ has_policy_rule() {
     -v lookup="lookup ${table}" '
       $1 == pref {
         line = tolower($0)
-        mark_matches = index(line, signature)
+        mark_matches = index(line, signature " ")
         if (full_mask == expected_full_mask && index(line, full_signature)) mark_matches = 1
         if (mark_matches && line ~ lookup "([[:space:]]|$)") found = 1
       }
@@ -293,16 +299,18 @@ rollback_netfilter_rules() {
 
 rollback_rules() {
   rollback_netfilter_rules
+  delete_policy_route "${TPROXY_MARK}" "${TPROXY_MASK}" \
+    "${TPROXY_TABLE}" "${TPROXY_RULE_PREF}"
   delete_policy_route "${TPROXY_MARK}" "${FULL_MARK_MASK}" \
     "${TPROXY_TABLE}" "${TPROXY_RULE_PREF}"
 }
 
 install_policy_route() {
   policy_slot_is_free || return 1
-  ip rule add fwmark "${TPROXY_MARK}/${FULL_MARK_MASK}" \
+  ip rule add fwmark "${TPROXY_MARK}/${TPROXY_MASK}" \
     table "${TPROXY_TABLE}" pref "${TPROXY_RULE_PREF}" || return 1
   if ! ip route add local 0.0.0.0/0 dev lo table "${TPROXY_TABLE}"; then
-    delete_policy_route "${TPROXY_MARK}" "${FULL_MARK_MASK}" \
+    delete_policy_route "${TPROXY_MARK}" "${TPROXY_MASK}" \
       "${TPROXY_TABLE}" "${TPROXY_RULE_PREF}"
     return 1
   fi
@@ -336,7 +344,7 @@ install_mangle_rules() {
   ipt -t mangle -A "${MBOX_OUTPUT_CHAIN}" -p tcp --dport 53 -j RETURN || return 1
   add_mangle_bypass_rules "${MBOX_OUTPUT_CHAIN}" || return 1
   ipt -t mangle -A "${MBOX_OUTPUT_CHAIN}" -j MARK \
-    --set-xmark "${TPROXY_MARK}/${FULL_MARK_MASK}" || return 1
+    --set-xmark "${TPROXY_MARK}/${TPROXY_MASK}" || return 1
 }
 
 install_dns_redirect_rules() {
@@ -408,7 +416,7 @@ setup_rules() {
 
 check_rules() {
   local mark="${TPROXY_MARK}"
-  local mask="${FULL_MARK_MASK}"
+  local mask="${TPROXY_MASK}"
   local table="${TPROXY_TABLE}"
   local pref="${TPROXY_RULE_PREF}"
   local port="${TPROXY_PORT}"
