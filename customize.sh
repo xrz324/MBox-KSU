@@ -47,6 +47,10 @@ cleanup_tproxy_check() {
   iptables -w 100 -t mangle -X "$tproxy_check_chain" >/dev/null 2>&1 || true
   iptables -w 100 -t nat -F "$tproxy_check_chain" >/dev/null 2>&1 || true
   iptables -w 100 -t nat -X "$tproxy_check_chain" >/dev/null 2>&1 || true
+  iptables -w 100 -t filter -F "$tproxy_check_chain" >/dev/null 2>&1 || true
+  iptables -w 100 -t filter -X "$tproxy_check_chain" >/dev/null 2>&1 || true
+  ip6tables -w 100 -t filter -F "$tproxy_check_chain" >/dev/null 2>&1 || true
+  ip6tables -w 100 -t filter -X "$tproxy_check_chain" >/dev/null 2>&1 || true
 }
 
 check_tproxy_support() {
@@ -56,11 +60,23 @@ check_tproxy_support() {
     cleanup_tproxy_check
     return 1
   fi
+  if ! iptables -w 100 -t filter -N "$tproxy_check_chain" >/dev/null 2>&1; then
+    cleanup_tproxy_check
+    return 1
+  fi
 
-  iptables -w 100 -t mangle -A "$tproxy_check_chain" -j MARK --set-xmark 268435456/268435456 >/dev/null 2>&1 &&
+  ip6tables -w 100 -t filter -N "$tproxy_check_chain" >/dev/null 2>&1 &&
+    ip6tables -w 100 -t filter -A "$tproxy_check_chain" -j DROP >/dev/null 2>&1 &&
+    ip6tables -w 100 -t filter -C "$tproxy_check_chain" -j DROP >/dev/null 2>&1 &&
+    iptables -w 100 -t filter -A "$tproxy_check_chain" -p icmp --icmp-type 3 -m conntrack --ctstate RELATED -j RETURN >/dev/null 2>&1 &&
+    iptables -w 100 -t filter -A "$tproxy_check_chain" -j DROP >/dev/null 2>&1 &&
+    iptables -w 100 -t filter -C "$tproxy_check_chain" -j DROP >/dev/null 2>&1 &&
+    iptables -w 100 -t mangle -A "$tproxy_check_chain" -j MARK --set-xmark 268435456/268435456 >/dev/null 2>&1 &&
     iptables -w 100 -t mangle -A "$tproxy_check_chain" -p tcp -j TPROXY --on-ip 127.0.0.1 --on-port 65535 --tproxy-mark 268435456/268435456 >/dev/null 2>&1 &&
     iptables -w 100 -t mangle -A "$tproxy_check_chain" -p udp -j TPROXY --on-ip 127.0.0.1 --on-port 65535 --tproxy-mark 268435456/268435456 >/dev/null 2>&1 &&
     iptables -w 100 -t mangle -A "$tproxy_check_chain" -m owner --uid-owner 0 --gid-owner 3005 -j RETURN >/dev/null 2>&1 &&
+    iptables -w 100 -t mangle -A "$tproxy_check_chain" -p tcp --syn -j CONNMARK --set-xmark 2097152/2097152 >/dev/null 2>&1 &&
+    iptables -w 100 -t mangle -A "$tproxy_check_chain" -m connmark --mark 2097152/2097152 -j RETURN >/dev/null 2>&1 &&
     iptables -w 100 -t mangle -A "$tproxy_check_chain" -m mark --mark 268435456/268435456 -j RETURN >/dev/null 2>&1 &&
     iptables -w 100 -t mangle -A "$tproxy_check_chain" -m addrtype --dst-type LOCAL -j RETURN >/dev/null 2>&1 &&
     iptables -w 100 -t mangle -A "$tproxy_check_chain" -m addrtype --dst-type BROADCAST -j RETURN >/dev/null 2>&1 &&
@@ -80,7 +96,7 @@ if [ "$KSU" = true ] && [ "$KSU_VER_CODE" -lt 26000 ]; then
   abort "Error: Please update your KernelSU"
 fi
 
-for required_command in busybox ip iptables ss; do
+for required_command in busybox ip iptables ip6tables ss; do
   require_command "$required_command"
 done
 check_busybox_applets
@@ -90,11 +106,13 @@ fi
 if ! check_ip_monitor; then
   abort "Error: ip monitor does not support link and address events"
 fi
-
-if ! check_tproxy_support; then
-  abort "Error: This device does not provide the required TPROXY, MARK, REDIRECT, owner UID/GID, or addrtype netfilter support"
+if ! ip -6 rule show >/dev/null 2>&1; then
+  abort "Error: IPv6 policy routing queries are unavailable"
 fi
-ui_print "- TProxy, DNS redirect, and netfilter support verified"
+if ! check_tproxy_support; then
+  abort "Error: This device does not provide the required TPROXY, MARK/CONNMARK, REDIRECT, owner UID/GID, addrtype, or ICMP/conntrack netfilter support"
+fi
+ui_print "- TProxy, DNS redirect, and egress filter support verified"
 
 service_dir="/data/adb/service.d"
 

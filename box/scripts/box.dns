@@ -1,5 +1,7 @@
 #!/system/bin/sh
 
+# Restrict the DNS listener; box.tproxy handles port 53 redirection.
+
 export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
 
 scripts_dir=$(dirname "$0")
@@ -9,7 +11,7 @@ CONFIG_FILE="${scripts_dir}/box.config"
 
 DNS_PORT="${DNS_PORT:-1053}"
 PROXY_HOTSPOT="${PROXY_HOTSPOT:-0}"
-HOTSPOT_INTERFACE="${HOTSPOT_INTERFACE-wlan1 ap0}"
+HOTSPOT_INTERFACE="${HOTSPOT_INTERFACE-wlan1}"
 
 readonly MBOX_DNS_INPUT_CHAIN="MBOX_DNS_INPUT"
 
@@ -34,6 +36,7 @@ is_uint() {
   esac
 }
 
+# Reject oversized input before mksh's signed 32-bit numeric comparisons.
 in_range() {
   is_uint "$1" && [ "${#1}" -le 9 ] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
 }
@@ -123,60 +126,12 @@ setup_rules() {
   log Info "Mihomo DNS port ${DNS_PORT} is restricted to local and hotspot traffic."
 }
 
-check_rules() {
-  local hotspot_interface
-  local protocol
-  local missing=0
-
-  if ! ipt -t filter -L "${MBOX_DNS_INPUT_CHAIN}" -n >/dev/null 2>&1; then
-    log Warn "missing DNS input filter chain: ${MBOX_DNS_INPUT_CHAIN}"
-    return 1
-  fi
-
-  if ! ipt -t filter -C "${MBOX_DNS_INPUT_CHAIN}" -i lo -j ACCEPT >/dev/null 2>&1; then
-    log Warn "missing loopback access to the Mihomo DNS listener."
-    missing=1
-  fi
-  if [ "${PROXY_HOTSPOT}" = "1" ]; then
-    for hotspot_interface in ${HOTSPOT_INTERFACE}; do
-      if ! ipt -t filter -C "${MBOX_DNS_INPUT_CHAIN}" \
-        -i "${hotspot_interface}" -j ACCEPT >/dev/null 2>&1; then
-        log Warn "missing DNS access for hotspot interface ${hotspot_interface}."
-        missing=1
-      fi
-    done
-  fi
-
-  for protocol in tcp udp; do
-    if ! ipt -t filter -C INPUT -p "${protocol}" --dport "${DNS_PORT}" \
-      -j "${MBOX_DNS_INPUT_CHAIN}" >/dev/null 2>&1; then
-      log Warn "missing DNS input filter hook for ${protocol}."
-      missing=1
-    fi
-    if ! ipt -t filter -C "${MBOX_DNS_INPUT_CHAIN}" \
-      -p "${protocol}" -j DROP >/dev/null 2>&1; then
-      log Warn "missing DNS input drop rule for ${protocol}."
-      missing=1
-    fi
-  done
-
-  return "${missing}"
-}
-
 case "$1" in
 start)
   setup_rules
   ;;
-status)
-  if check_rules; then
-    log Info "Mihomo DNS listener access is restricted."
-  else
-    log Warn "Mihomo DNS listener access rules are incomplete."
-    exit 1
-  fi
-  ;;
 *)
-  log Error "usage: $0 {start|status}"
+  log Error "usage: $0 start"
   exit 2
   ;;
 esac

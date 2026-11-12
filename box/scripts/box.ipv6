@@ -3,6 +3,8 @@
 export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
 
 readonly IPV6_CONF_DIR="/proc/sys/net/ipv6/conf"
+readonly BLOCK_RULE_PREF="1"
+readonly IPV6_BLOCK_CHAIN="MBOX_IPV6_BLOCK"
 readonly MONITOR_STATE="/data/adb/box/run/ipv6_monitor.runtime"
 readonly MONITOR_FIFO="/data/adb/box/run/ipv6_monitor.fifo"
 
@@ -25,6 +27,51 @@ is_uint() {
   '' | *[!0-9]*) return 1 ;;
   *) return 0 ;;
   esac
+}
+
+has_block_rule() {
+  ip -6 rule show 2>/dev/null | busybox awk -v pref="${BLOCK_RULE_PREF}:" '
+    $1 == pref {
+      if (NF == 4 && $2 == "from" && $3 == "all" && $4 == "unreachable") found = 1
+      else conflict = 1
+    }
+    END { exit !(found && !conflict) }
+  '
+}
+
+ensure_block_rule() {
+  local rules
+
+  has_block_rule && return 0
+  rules=$(ip -6 rule show) || return 1
+  while printf '%s\n' "${rules}" | busybox awk -v pref="${BLOCK_RULE_PREF}:" '
+    $1 == pref { found = 1 }
+    END { exit !found }
+  '; do
+    log Warn "IPv6 rule preference ${BLOCK_RULE_PREF} is occupied; replacing it with unreachable."
+    if ! ip -6 rule del pref "${BLOCK_RULE_PREF}"; then
+      log Error "cannot replace IPv6 rule preference ${BLOCK_RULE_PREF}."
+      return 1
+    fi
+    rules=$(ip -6 rule show) || return 1
+  done
+  ip -6 rule add unreachable pref "${BLOCK_RULE_PREF}" || return 1
+  has_block_rule || return 1
+  log Info "IPv6 external routing is blocked."
+}
+
+ipv6_filter() {
+  local hook
+
+  ip6tables -w 100 -t filter -N "${IPV6_BLOCK_CHAIN}" >/dev/null 2>&1 ||
+    ip6tables -w 100 -t filter -L "${IPV6_BLOCK_CHAIN}" -n >/dev/null 2>&1 || return 1
+  ip6tables -w 100 -t filter -C "${IPV6_BLOCK_CHAIN}" -j DROP >/dev/null 2>&1 ||
+    ip6tables -w 100 -t filter -A "${IPV6_BLOCK_CHAIN}" -j DROP || return 1
+  # Packet filters cover all interfaces except lo, including IMS.
+  for hook in OUTPUT FORWARD; do
+    ip6tables -w 100 -t filter -C "${hook}" ! -o lo -j "${IPV6_BLOCK_CHAIN}" >/dev/null 2>&1 && continue
+    ip6tables -w 100 -t filter -I "${hook}" 1 ! -o lo -j "${IPV6_BLOCK_CHAIN}" || return 1
+  done
 }
 
 has_global_ipv4() {
@@ -81,8 +128,7 @@ sync_ipv6_interfaces() {
       excluded=$((excluded + 1))
       continue
     fi
-    # An unaddressed rmnet interface may become the IPv6-only IMS bearer.
-    # Leave it enabled until its address family is observable.
+    # Leave unaddressed rmnet interfaces enabled until IMS can be identified.
     if is_unclassified_rmnet_interface "${interface}"; then
       continue
     fi
@@ -100,7 +146,7 @@ sync_ipv6_interfaces() {
     fi
 
     if ! printf "1\n" 2>/dev/null >"${setting}"; then
-      # The interface may disappear while netd rebuilds a network.
+      # netd may remove the interface during this write.
       [ -e "${setting}" ] || continue
       [ "${quiet}" = "quiet" ] || \
         log Error "cannot disable IPv6 on interface ${interface}."
@@ -124,8 +170,7 @@ sync_ipv6_interfaces() {
 sync_ipv6_after_event() {
   local drained=0
 
-  # netd emits several link/address events while an interface is still being
-  # rebuilt. Coalesce a bounded burst and wait for one quiet second.
+  # Coalesce bounded netd event bursts before rescanning interfaces.
   while [ "${drained}" -lt 32 ] && IFS= read -r -t 1 _; do
     drained=$((drained + 1))
   done
@@ -136,28 +181,6 @@ sync_ipv6_after_event() {
 
   log Warn "IPv6 interface update is still in progress; waiting for the next network event."
   return 1
-}
-
-check_ipv6_block() {
-  local interface
-  local setting
-  local missing=0
-
-  for interface in $(list_ipv6_interfaces); do
-    if is_ipv6_only_ims_interface "${interface}"; then
-      continue
-    fi
-    if is_unclassified_rmnet_interface "${interface}"; then
-      continue
-    fi
-
-    setting="${IPV6_CONF_DIR}/${interface}/disable_ipv6"
-    if [ "$(cat "${setting}" 2>/dev/null)" != "1" ]; then
-      log Warn "IPv6 remains enabled on interface ${interface}."
-      missing=1
-    fi
-  done
-  return "${missing}"
 }
 
 read_monitor_value() {
@@ -171,6 +194,7 @@ process_start_time() {
   busybox awk '{ print $22; exit }' "/proc/$1/stat" 2>/dev/null
 }
 
+# Match the start time as well as the PID to avoid PID reuse.
 process_matches() {
   local pid="$1"
   local expected_start="$2"
@@ -218,6 +242,7 @@ monitor_cleanup() {
   fi
 }
 
+# Publish process identities together so readers never see partial state.
 publish_monitor_state() {
   local state_tmp="${MONITOR_STATE}.tmp.$$"
 
@@ -307,11 +332,12 @@ start_monitor() {
 }
 
 start_ipv6() {
+  ipv6_filter || return 1
+  ensure_block_rule || return 1
   sync_ipv6_interfaces "" || return 1
   start_monitor || return 1
 
-  # Close the gap between the initial scan and the event listener becoming
-  # active. Later netd changes are handled by the monitor.
+  # Rescan for changes that occurred before the listener was ready.
   sync_ipv6_interfaces quiet || true
 }
 
@@ -319,19 +345,11 @@ case "$1" in
 start)
   start_ipv6
   ;;
-status)
-  if check_ipv6_block && monitor_is_running; then
-    log Info "IPv6 is disabled on every non-IMS interface."
-  else
-    monitor_is_running || log Warn "IPv6 network monitoring is not running."
-    exit 1
-  fi
-  ;;
 monitor)
   monitor_interfaces
   ;;
 *)
-  log Error "usage: $0 {start|status}"
+  log Error "usage: $0 {start|monitor}"
   exit 2
   ;;
 esac

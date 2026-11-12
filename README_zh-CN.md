@@ -4,39 +4,44 @@
 
 [English](README.md) | 简体中文
 
-本模块用于在 Android 设备上启动 **Mihomo**，通过 **TProxy** 或 **TUN** 接管设备流量。TProxy 实现额外支持热点代理和 DNS 53 端口劫持。
+用于在 Android 设备上运行 **Mihomo** 的 KernelSU 模块，支持 **TProxy**、**TUN**、热点代理，以及 TProxy 模式下的 DNS 53 端口重定向。
 
 ## 安装
 
-1. 在 KernelSU Manager 中安装模块
-2. 下载合适的 `mihomo` 可执行文件放至：`/data/adb/box/bin/mihomo`
-3. 编辑配置文件：`/data/adb/box/mihomo/config.yaml`
+1. 在 KernelSU Manager 中安装模块。
+2. 下载适合设备架构的 `mihomo` 可执行文件，放至 `/data/adb/box/bin/mihomo`。
+3. 按下文配置 Mihomo 和模块，然后重启设备。
 
-安装脚本会检查必要命令和所需内核能力，任一能力缺失即会拒绝安装。
+安装时会自动检查必要命令和内核能力。
 
 ## 配置
 
-- Mihomo 配置：`/data/adb/box/mihomo/config.yaml`
-- 模块脚本配置：`/data/adb/box/scripts/box.config`
-  - `CORE_USER_GROUP`：默认 `root:net_admin`。`xt_owner` 同时匹配 UID 和 socket 主 GID，因此其他仅附加 `net_admin` 组的进程不会旁路
-  - `TPROXY_RULE_PREF`：必须小于 `10000`，确保路由规则优先于 Android netd
-  - `TPROXY_MARK`：使用 `2^21` 至 `2^28` 中的单个位，默认 `0x10000000`，保留其他 Android 标记
-  - `DNS_PORT`：需与 `dns.listen` 中的端口一致；热点 DNS 重定向要求监听地址为 `0.0.0.0`
-- 状态检查命令：`/data/adb/box/scripts/box.service status`
+- Mihomo 配置：`/data/adb/box/mihomo/config.yaml`，参见[内置配置](box/mihomo/config.yaml)。
+- 模块配置：`/data/adb/box/scripts/box.config`，参见[配置参数](box/scripts/box.config)。
 
-## 提示
+常用模块参数：
 
-`HOTSPOT_INTERFACE` 应填**具体 AP 接口**。`wlan+` 通配会同时命中手机 WiFi，同网段主机可能借道代理。实际接口名应在开启热点后用 `ip -o link` 确认。
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PROXY_MODE` | `tproxy` | 代理模式：`tproxy` 或 `tun` |
+| `TPROXY_PORT` | `1536` | 与 Mihomo 的 `tproxy-port` 一致 |
+| `DNS_PORT` | `1053` | 与 Mihomo 的 `dns.listen` 端口一致 |
+| `FAKE_IP_RANGE` | `198.18.0.0/16` | 与 Mihomo 的 `dns.fake-ip-range` 网段一致 |
+| `PROXY_HOTSPOT` | `1` | 开启（`1`）或关闭（`0`）热点代理 |
+| `HOTSPOT_INTERFACE` | `wlan1` | 热点接口，多个接口用空格分隔 |
+| `tun_device` | `mihomo` | 与 Mihomo 的 `tun.device` 一致 |
 
-热点代理不要求 `allow-lan: true`。TProxy 规则使用 `--on-ip 127.0.0.1` 将查找地址固定在回环上，无须端口对外可见。
+Mihomo 配置中的 `tun.enable` 应与模式对应：TProxy 模式设为 `false`，TUN 模式设为 `true`。其余模块参数通常保持默认即可。
 
-本地、回环、广播、组播、未指定地址、RFC 1918 私网、`100.64.0.0/10` 共享地址及 `169.254.0.0/16` 链路本地地址在 TCP/UDP 内核规则中直接旁路，不进入 Mihomo。DNS 53 重定向先于目的地址旁路；其他保留单播地址仍交由 Mihomo 决策。
+热点代理仅覆盖 `HOTSPOT_INTERFACE` 中配置的接口。开启热点后，可用 `ip -o link` 确认实际接口；避免使用会同时匹配普通 Wi-Fi 接口的 `wlan+` 等通配写法。TProxy 热点 DNS 重定向需要 `dns.listen: 0.0.0.0:1053`，端口与 `DNS_PORT` 对应；无需开启 `allow-lan: true`。
 
-模块不支持与系统 VPN 或其他透明代理同时使用。系统启动完成后立即装载 TProxy 规则，再启动 Mihomo；Mihomo 异常时，已接管流量会直接失败，不会回退直连。TProxy 模式等待透明代理监听，TUN 模式等待配置的 TUN 设备。仅在 TProxy 模式下，TCP/UDP 53 才通过 NAT 直接重定向到 Mihomo DNS 监听端口，两种模式都会限制 DNS 监听端口只接受本机回环与配置的热点接口流量。模块不提供运行期停止或重启功能；停用模块或修改运行模式及规则配置后，应重启设备。
+## 使用说明
 
-IPv6 在启动后通过各接口的 `disable_ipv6` 禁用，具有 IPv6 地址且没有 IPv4 地址的 `rmnet*` 接口视为 IMS 承载并排除；尚未分配地址的 `rmnet*` 不被处理。`ip monitor link address` 在接口或地址变化后触发重扫；事件会先短暂合并，并对 netd 重建接口期间的瞬时写入失败静默重试。禁用或卸载模块后重启设备，内核网络状态会随重启清除。
-
-TProxy 标记设计参考 [Linux 内核透明代理文档](https://docs.kernel.org/networking/tproxy.html)、[AOSP Fwmark 定义](https://android.googlesource.com/platform/system/netd/+/master/include/Fwmark.h) 与 [Xray 的 GID 防环实践](https://xtls.github.io/document/level-2/iptables_gid.html)。核心进程通过 UID 0 与主 GID `net_admin` 的组合在 `OUTPUT` 中旁路，不依赖 socket mark。
+- 系统启动完成后自动运行 Mihomo。更新或停用模块、切换模式、修改规则配置后需重启；不提供运行期停止、重启命令。
+- 不支持与系统 VPN 或其他透明代理同时使用。
+- TProxy 规则对局域网、组播等本地用途地址直接旁路；DNS 53 重定向优先于目的地址旁路。
+- IPv4 过滤会阻止未代理的公网非 TCP/UDP 流量，包括 ICMP 探测；保留局域网访问及关联连接的 ICMP 错误。
+- IPv6 默认阻断，部分依赖 IPv6 的通话或网络功能可能受影响。
 
 ## 日志
 
@@ -46,7 +51,7 @@ TProxy 标记设计参考 [Linux 内核透明代理文档](https://docs.kernel.o
 
 ## 卸载
 
-- 卸载模块会移除 service 脚本，但保留 `/data/adb/box` 数据目录；卸载后需重启设备。
+卸载会移除自启动脚本，保留 `/data/adb/box` 及其中数据。卸载后需重启设备。
 
 ## 许可证
 

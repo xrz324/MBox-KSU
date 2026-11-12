@@ -14,29 +14,35 @@ DNS_PORT="${DNS_PORT:-1053}"
 TPROXY_MARK="${TPROXY_MARK:-268435456}"
 TPROXY_TABLE="${TPROXY_TABLE:-2025}"
 TPROXY_RULE_PREF="${TPROXY_RULE_PREF:-2025}"
+FAKE_IP_RANGE="${FAKE_IP_RANGE:-198.18.0.0/16}"
 CORE_USER_GROUP="${CORE_USER_GROUP:-root:net_admin}"
+PROXY_MODE="${PROXY_MODE:-tproxy}"
 PROXY_HOTSPOT="${PROXY_HOTSPOT:-0}"
-HOTSPOT_INTERFACE="${HOTSPOT_INTERFACE-wlan1 ap0}"
+HOTSPOT_INTERFACE="${HOTSPOT_INTERFACE-wlan1}"
+tun_device="${tun_device:-mihomo}"
 
 readonly MBOX_TPROXY_CHAIN="MBOX_TPROXY"
 readonly MBOX_PREROUTING_CHAIN="MBOX_PREROUTING"
 readonly MBOX_OUTPUT_CHAIN="MBOX_OUTPUT"
 readonly MBOX_DNS_OUTPUT_CHAIN="MBOX_DNS_OUTPUT"
 readonly MBOX_DNS_PREROUTING_CHAIN="MBOX_DNS_PREROUTING"
+readonly MBOX_EGRESS_CHAIN="MBOX_EGRESS"
+readonly MBOX_HOTSPOT_CHAIN="MBOX_HOTSPOT"
 
-# Android netd installs its policy routing rules from this preference upwards;
-# the TProxy rule must be evaluated before them.
+# Intercept before Android netd policy rules (priority 10000 and above).
 readonly NETD_RULE_PREF="10000"
 
-# Only own the configured reserved bit. Android's netId, permissions, billing
-# and vendor marks must survive interception and must not affect our lookup.
+# Change only the reserved routing bit; preserve Android's fwmark fields.
 readonly TPROXY_MASK="${TPROXY_MARK}"
-# Recognize the old full-width signature when removing stale rules.
+# Use a separate conntrack bit; never restore it into packet marks.
+case "${TPROXY_MARK}" in
+2097152) readonly CORE_CONNMARK="4194304" ;;
+*) readonly CORE_CONNMARK="2097152" ;;
+esac
+# Remove legacy rules that matched the full packet mark.
 readonly FULL_MARK_MASK="4294967295"
 
-# Local-use destinations bypass Mihomo. Documentation, benchmarking (including
-# the default fake-IP range) and other reserved unicast ranges remain available
-# to Mihomo's routing rules.
+# Bypass local-use networks; keep fake-IP and other reserved unicast proxied.
 readonly KERNEL_BYPASS_SUBNETS="
     0.0.0.0/32
     10.0.0.0/8
@@ -69,14 +75,11 @@ is_uint() {
   esac
 }
 
-# Android's /system/bin/sh is mksh, whose arithmetic is fixed 32-bit signed:
-# a literal above 2147483647 wraps and silently inverts the comparison. Any
-# value reaching a numeric test is therefore capped at 9 digits first.
+# Limit input to nine digits before mksh's signed 32-bit comparisons.
 in_range() {
   is_uint "$1" && [ "${#1}" -le 9 ] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
 }
 
-# Create the chain, or flush it when a stale one is left behind.
 ensure_chain() {
   local table="$1"
   local chain="$2"
@@ -88,9 +91,48 @@ ensure_chain() {
   return 1
 }
 
-validate_config() {
+validate_guard_config() {
   local hotspot_interface
   local hotspot_interface_count=0
+
+  if [ "${CORE_USER_GROUP}" != "root:net_admin" ]; then
+    log Error "invalid CORE_USER_GROUP: ${CORE_USER_GROUP}; expected root:net_admin."
+    return 1
+  fi
+  case "${PROXY_MODE}" in
+  tproxy | tun) ;;
+  *) log Error "invalid PROXY_MODE: ${PROXY_MODE}"; return 1 ;;
+  esac
+  case "${tun_device}" in
+  '' | *[!a-zA-Z0-9_.:-]* | -*)
+    log Error "invalid TUN interface: ${tun_device}"
+    return 1
+    ;;
+  esac
+  for hotspot_interface in ${HOTSPOT_INTERFACE}; do
+    hotspot_interface_count=$((hotspot_interface_count + 1))
+    case "${hotspot_interface}" in
+    *[!a-zA-Z0-9_.:+-]* | -* | +* | *+?*)
+      log Error "invalid hotspot interface: ${hotspot_interface}"
+      return 1
+      ;;
+    *+) log Warn "${hotspot_interface} may match unintended interfaces." ;;
+    esac
+  done
+  case "${PROXY_HOTSPOT}" in
+  0) ;;
+  1)
+    if [ "${hotspot_interface_count}" -eq 0 ]; then
+      log Error "HOTSPOT_INTERFACE cannot be empty when hotspot proxy is enabled."
+      return 1
+    fi
+    ;;
+  *) log Error "invalid PROXY_HOTSPOT: ${PROXY_HOTSPOT}"; return 1 ;;
+  esac
+}
+
+validate_config() {
+  validate_guard_config || return 1
 
   if ! in_range "${TPROXY_PORT}" 1 65535; then
     log Error "invalid TPROXY_PORT: ${TPROXY_PORT}; expected 1-65535."
@@ -106,14 +148,41 @@ validate_config() {
     return 1
   fi
 
-  # AOSP reserves bits 21-28. Lower bits carry netd state; bits 29-31 are
-  # vendor/wakeup fields. Require a single bit so our mask owns no other state.
+  # AOSP reserves bits 21-28; accept one bit without touching netd/vendor fields.
   if ! in_range "${TPROXY_MARK}" 2097152 268435456; then
     log Error "invalid TPROXY_MARK: ${TPROXY_MARK}; expected one reserved bit (2^21-2^28)."
     return 1
   fi
   if [ "$((TPROXY_MARK & (TPROXY_MARK - 1)))" -ne 0 ]; then
     log Error "TPROXY_MARK must contain exactly one reserved bit."
+    return 1
+  fi
+
+  if ! printf '%s\n' "${FAKE_IP_RANGE}" | busybox awk -F '[./]' \
+    -v bypass="${KERNEL_BYPASS_SUBNETS}" '
+      function address_number(value, parts) {
+        split(value, parts, ".")
+        return ((parts[1] * 256 + parts[2]) * 256 + parts[3]) * 256 + parts[4]
+      }
+      NF != 5 || NR != 1 { exit 1 }
+      {
+        for (i = 1; i <= 4; i++) {
+          if ($i !~ /^[0-9]+$/ || length($i) > 3 || $i > 255 || $i ~ /^0[0-9]/) exit 1
+        }
+        if ($5 !~ /^([1-9]|[12][0-9]|3[0-2])$/) exit 1
+        first = address_number($1 "." $2 "." $3 "." $4)
+        size = 2 ^ (32 - $5)
+        if (first % size != 0) exit 1
+        count = split(bypass, subnets, /[[:space:]]+/)
+        for (i = 1; i <= count; i++) {
+          if (subnets[i] == "") continue
+          split(subnets[i], subnet, "/")
+          excluded = address_number(subnet[1])
+          if (first < excluded + 2 ^ (32 - subnet[2]) && excluded < first + size) exit 1
+        }
+      }
+    '; then
+    log Error "invalid FAKE_IP_RANGE: ${FAKE_IP_RANGE}; expected an IPv4 network prefix outside the bypass subnets."
     return 1
   fi
 
@@ -134,37 +203,79 @@ validate_config() {
     return 1
   fi
 
-  if [ "${CORE_USER_GROUP}" != "root:net_admin" ]; then
-    log Error "invalid CORE_USER_GROUP: ${CORE_USER_GROUP}; expected root:net_admin."
-    return 1
-  fi
+}
 
-  for hotspot_interface in ${HOTSPOT_INTERFACE}; do
-    hotspot_interface_count=$((hotspot_interface_count + 1))
-    case "${hotspot_interface}" in
-    *[!a-zA-Z0-9_.:+-]* | -* | +* | *+?*)
-      log Error "invalid hotspot interface: ${hotspot_interface}"
-      return 1
-      ;;
-    *+)
-      log Warn "${hotspot_interface} may match all inbound interface, which turns the device into an open proxy."
-      ;;
-    esac
+guard_rule() {
+  local chain="$1"
+  shift
+
+  ipt -t filter -C "${chain}" "$@" >/dev/null 2>&1 && return 0
+  ipt -t filter -I "${chain}" 1 "$@"
+}
+
+guard_rules() {
+  local chain
+  local subnet
+  local protocol
+  local icmp_type
+  local hotspot_interface
+
+  for chain in "${MBOX_EGRESS_CHAIN}" "${MBOX_HOTSPOT_CHAIN}"; do
+    if [ "${chain}" = "${MBOX_HOTSPOT_CHAIN}" ] && [ "${PROXY_HOTSPOT}" != "1" ]; then
+      continue
+    fi
+    # Keep active guards intact and attach DROP before adding exceptions.
+    ipt -t filter -N "${chain}" >/dev/null 2>&1 ||
+      ipt -t filter -L "${chain}" -n >/dev/null 2>&1 || return 1
+    ipt -t filter -C "${chain}" -j DROP >/dev/null 2>&1 ||
+      ipt -t filter -A "${chain}" -j DROP || return 1
+    if [ "${chain}" = "${MBOX_EGRESS_CHAIN}" ]; then
+      guard_rule OUTPUT -j "${chain}" || return 1
+    else
+      for hotspot_interface in ${HOTSPOT_INTERFACE}; do
+        guard_rule FORWARD -i "${hotspot_interface}" -j "${chain}" || return 1
+      done
+    fi
+
   done
 
-  case "${PROXY_HOTSPOT}" in
-  0) ;;
-  1)
-    if [ "${hotspot_interface_count}" -eq 0 ]; then
-      log Error "HOTSPOT_INTERFACE cannot be empty when hotspot proxy is enabled."
-      return 1
+  # Attach every guard before adding exceptions to either chain.
+  for chain in "${MBOX_EGRESS_CHAIN}" "${MBOX_HOTSPOT_CHAIN}"; do
+    if [ "${chain}" = "${MBOX_HOTSPOT_CHAIN}" ] && [ "${PROXY_HOTSPOT}" != "1" ]; then
+      continue
     fi
-    ;;
-  *)
-    log Error "invalid PROXY_HOTSPOT: ${PROXY_HOTSPOT}"
-    return 1
-    ;;
-  esac
+    # TCP/UDP is handled by TProxy/TUN, without a second egress restriction.
+    for protocol in tcp udp; do
+      guard_rule "${chain}" -p "${protocol}" -j RETURN || return 1
+    done
+    guard_rule "${chain}" -o lo -j RETURN || return 1
+    if [ "${PROXY_MODE}" = "tun" ]; then
+      guard_rule "${chain}" -o "${tun_device}" -j RETURN || return 1
+    fi
+    guard_rule "${chain}" -m addrtype --dst-type LOCAL -j RETURN || return 1
+    guard_rule "${chain}" -m addrtype --dst-type BROADCAST -j RETURN || return 1
+    for subnet in ${KERNEL_BYPASS_SUBNETS}; do
+      guard_rule "${chain}" -d "${subnet}" -j RETURN || return 1
+    done
+    # Allow only related ICMP errors here, including those needed for PMTU.
+    for icmp_type in 3 11 12; do
+      guard_rule "${chain}" -p icmp --icmp-type "${icmp_type}" \
+        -m conntrack --ctstate RELATED -j RETURN || return 1
+    done
+  done
+}
+
+setup_guard_rules() {
+  local failed=0
+
+  validate_guard_config || return 1
+  if ! guard_rules; then
+    log Error "cannot install IPv4 egress protection; existing guard rules remain active."
+    failed=1
+  fi
+  "${ipv6_path}" start || failed=1
+  [ "${failed}" -eq 0 ] || return 1
+  log Info "IPv4 egress protection is enabled."
 }
 
 add_mangle_bypass_rules() {
@@ -190,6 +301,8 @@ tproxy_to_core() {
 delete_hooks() {
   local hotspot_interface
 
+  while ipt -t mangle -D PREROUTING -i lo -d "${FAKE_IP_RANGE}" \
+    -j "${MBOX_PREROUTING_CHAIN}" >/dev/null 2>&1; do :; done
   while ipt -t mangle -D OUTPUT -p tcp -j "${MBOX_OUTPUT_CHAIN}" >/dev/null 2>&1; do :; done
   while ipt -t mangle -D OUTPUT -p udp -j "${MBOX_OUTPUT_CHAIN}" >/dev/null 2>&1; do :; done
   while ipt -t mangle -D PREROUTING -p tcp -j "${MBOX_PREROUTING_CHAIN}" >/dev/null 2>&1; do :; done
@@ -222,41 +335,9 @@ delete_chains() {
   done
 }
 
-has_policy_rule() {
-  local mark="$1"
-  local mask="$2"
-  local table="$3"
-  local pref="$4"
-  local mark_hex
-  local mask_hex
-  local signature
-
-  mark_hex=$(printf "0x%x" "${mark}")
-  if [ "${mask}" = "${FULL_MARK_MASK}" ]; then
-    mask_hex="0xffffffff"
-  else
-    mask_hex=$(printf "0x%x" "${mask}")
-  fi
-  signature="fwmark ${mark_hex}/${mask_hex}"
-  ip rule show 2>/dev/null | busybox awk \
-    -v pref="${pref}:" -v signature="${signature}" -v full_signature="fwmark ${mark_hex} " \
-    -v full_mask="${mask}" -v expected_full_mask="${FULL_MARK_MASK}" \
-    -v lookup="lookup ${table}" '
-      $1 == pref {
-        line = tolower($0)
-        mark_matches = index(line, signature " ")
-        if (full_mask == expected_full_mask && index(line, full_signature)) mark_matches = 1
-        if (mark_matches && line ~ lookup "([[:space:]]|$)") found = 1
-      }
-      END { exit !found }
-    '
-}
-
-has_policy_route() {
-  local table="$1"
-
-  ip route show table "${table}" 2>/dev/null |
-    grep -Eq '^local (default|0\.0\.0\.0/0) dev lo([[:space:]]|$)'
+delete_fake_ip_rules() {
+  while ip -4 rule del iif lo to "${FAKE_IP_RANGE}" \
+    table "${TPROXY_TABLE}" pref "${TPROXY_RULE_PREF}" >/dev/null 2>&1; do :; done
 }
 
 policy_slot_is_free() {
@@ -299,6 +380,7 @@ rollback_netfilter_rules() {
 
 rollback_rules() {
   rollback_netfilter_rules
+  delete_fake_ip_rules
   delete_policy_route "${TPROXY_MARK}" "${TPROXY_MASK}" \
     "${TPROXY_TABLE}" "${TPROXY_RULE_PREF}"
   delete_policy_route "${TPROXY_MARK}" "${FULL_MARK_MASK}" \
@@ -309,7 +391,15 @@ install_policy_route() {
   policy_slot_is_free || return 1
   ip rule add fwmark "${TPROXY_MARK}/${TPROXY_MASK}" \
     table "${TPROXY_TABLE}" pref "${TPROXY_RULE_PREF}" || return 1
-  if ! ip route add local 0.0.0.0/0 dev lo table "${TPROXY_TABLE}"; then
+  # Keep fake-IP source selection independent of physical interface addresses.
+  if ! ip route add local 0.0.0.0/0 dev lo src 127.0.0.1 table "${TPROXY_TABLE}"; then
+    delete_policy_route "${TPROXY_MARK}" "${TPROXY_MASK}" \
+      "${TPROXY_TABLE}" "${TPROXY_RULE_PREF}"
+    return 1
+  fi
+  if ! ip -4 rule add iif lo to "${FAKE_IP_RANGE}" \
+    table "${TPROXY_TABLE}" pref "${TPROXY_RULE_PREF}"; then
+    delete_fake_ip_rules
     delete_policy_route "${TPROXY_MARK}" "${TPROXY_MASK}" \
       "${TPROXY_TABLE}" "${TPROXY_RULE_PREF}"
     return 1
@@ -325,12 +415,14 @@ install_mangle_rules() {
   ensure_chain mangle "${MBOX_PREROUTING_CHAIN}" || return 1
   ensure_chain mangle "${MBOX_OUTPUT_CHAIN}" || return 1
 
-  # DNS is redirected to Mihomo's DNS listener later in the nat hook.
+  # Leave port 53 to DNS redirection in the nat table.
   ipt -t mangle -A "${MBOX_TPROXY_CHAIN}" -p udp --dport 53 -j RETURN || return 1
   ipt -t mangle -A "${MBOX_TPROXY_CHAIN}" -p tcp --dport 53 -j RETURN || return 1
   add_mangle_bypass_rules "${MBOX_TPROXY_CHAIN}" || return 1
   tproxy_to_core "${MBOX_TPROXY_CHAIN}" -p udp || return 1
   tproxy_to_core "${MBOX_TPROXY_CHAIN}" -p tcp || return 1
+  # Drop non-TCP/UDP traffic delivered by the fake-IP route.
+  ipt -t mangle -A "${MBOX_TPROXY_CHAIN}" -j DROP || return 1
 
   ipt -t mangle -A "${MBOX_PREROUTING_CHAIN}" -i lo -j "${MBOX_TPROXY_CHAIN}" || return 1
   if [ "${PROXY_HOTSPOT}" = "1" ]; then
@@ -339,7 +431,17 @@ install_mangle_rules() {
     done
   fi
 
+  # Tag only the core's SYN; tagging accepted SYN/ACK would bypass clients.
+  ipt -t mangle -A "${MBOX_OUTPUT_CHAIN}" -p tcp --syn -m owner \
+    --uid-owner "${core_user}" --gid-owner "${core_group}" \
+    -j CONNMARK --set-xmark "${CORE_CONNMARK}/${CORE_CONNMARK}" || return 1
   ipt -t mangle -A "${MBOX_OUTPUT_CHAIN}" -m owner --uid-owner "${core_user}" --gid-owner "${core_group}" -j RETURN || return 1
+  # Clear stale core tags before intercepting a new application connection.
+  ipt -t mangle -A "${MBOX_OUTPUT_CHAIN}" -p tcp --syn \
+    -j CONNMARK --set-xmark "0/${CORE_CONNMARK}" || return 1
+  # Kernel RST and TIME_WAIT ACK rely on the connection tag after owner loss.
+  ipt -t mangle -A "${MBOX_OUTPUT_CHAIN}" -p tcp -m connmark \
+    --mark "${CORE_CONNMARK}/${CORE_CONNMARK}" -j RETURN || return 1
   ipt -t mangle -A "${MBOX_OUTPUT_CHAIN}" -p udp --dport 53 -j RETURN || return 1
   ipt -t mangle -A "${MBOX_OUTPUT_CHAIN}" -p tcp --dport 53 -j RETURN || return 1
   add_mangle_bypass_rules "${MBOX_OUTPUT_CHAIN}" || return 1
@@ -384,11 +486,13 @@ install_hooks() {
   ipt -t mangle -I OUTPUT 1 -p udp -j "${MBOX_OUTPUT_CHAIN}" || return 1
   ipt -t mangle -I PREROUTING 1 -p tcp -j "${MBOX_PREROUTING_CHAIN}" || return 1
   ipt -t mangle -I PREROUTING 1 -p udp -j "${MBOX_PREROUTING_CHAIN}" || return 1
+  ipt -t mangle -I PREROUTING 1 -i lo -d "${FAKE_IP_RANGE}" \
+    -j "${MBOX_PREROUTING_CHAIN}" || return 1
 }
 
 setup_rules() {
+  setup_guard_rules || return 1
   validate_config || return 1
-  "${ipv6_path}" start || return 1
   "${dns_path}" start || return 1
   rollback_rules
 
@@ -414,119 +518,15 @@ setup_rules() {
   log Info "TProxy rules are enabled on port ${TPROXY_PORT}."
 }
 
-check_rules() {
-  local mark="${TPROXY_MARK}"
-  local mask="${TPROXY_MASK}"
-  local table="${TPROXY_TABLE}"
-  local pref="${TPROXY_RULE_PREF}"
-  local port="${TPROXY_PORT}"
-  local chain
-  local protocol
-  local missing=0
-
-  for chain in "${MBOX_TPROXY_CHAIN}" "${MBOX_PREROUTING_CHAIN}" "${MBOX_OUTPUT_CHAIN}"; do
-    if ! ipt -t mangle -L "${chain}" -n >/dev/null 2>&1; then
-      log Warn "missing mangle chain: ${chain}"
-      missing=1
-    fi
-  done
-
-  for chain in "${MBOX_DNS_OUTPUT_CHAIN}" "${MBOX_DNS_PREROUTING_CHAIN}"; do
-    if ! ipt -t nat -L "${chain}" -n >/dev/null 2>&1; then
-      log Warn "missing nat chain: ${chain}"
-      missing=1
-    fi
-  done
-  for protocol in tcp udp; do
-    if ! ipt -t mangle -C OUTPUT -p "${protocol}" -j "${MBOX_OUTPUT_CHAIN}" >/dev/null 2>&1; then
-      log Warn "missing mangle OUTPUT hook for ${protocol}."
-      missing=1
-    fi
-    if ! ipt -t mangle -C PREROUTING -p "${protocol}" -j "${MBOX_PREROUTING_CHAIN}" >/dev/null 2>&1; then
-      log Warn "missing mangle PREROUTING hook for ${protocol}."
-      missing=1
-    fi
-    if ! ipt -t nat -C OUTPUT -p "${protocol}" --dport 53 \
-      -j "${MBOX_DNS_OUTPUT_CHAIN}" >/dev/null 2>&1; then
-      log Warn "missing DNS redirect hook for local ${protocol}."
-      missing=1
-    fi
-    if ! ipt -t nat -C "${MBOX_DNS_OUTPUT_CHAIN}" -p "${protocol}" \
-      -j REDIRECT --to-ports "${DNS_PORT}" >/dev/null 2>&1; then
-      log Warn "missing local DNS redirect target for ${protocol}."
-      missing=1
-    fi
-    if ! ipt -t nat -C "${MBOX_DNS_PREROUTING_CHAIN}" -p "${protocol}" \
-      -j REDIRECT --to-ports "${DNS_PORT}" >/dev/null 2>&1; then
-      log Warn "missing hotspot DNS redirect target for ${protocol}."
-      missing=1
-    fi
-  done
-
-  if [ "${PROXY_HOTSPOT}" = "1" ]; then
-    local hotspot_interface
-    for hotspot_interface in ${HOTSPOT_INTERFACE}; do
-      for protocol in tcp udp; do
-        if ! ipt -t nat -C PREROUTING -i "${hotspot_interface}" \
-          -p "${protocol}" --dport 53 -j "${MBOX_DNS_PREROUTING_CHAIN}" >/dev/null 2>&1; then
-          log Warn "missing DNS redirect for ${protocol} on ${hotspot_interface}."
-          missing=1
-        fi
-      done
-    done
-  fi
-
-  for protocol in tcp udp; do
-    if ! ipt -t mangle -C "${MBOX_OUTPUT_CHAIN}" -p "${protocol}" \
-      --dport 53 -j RETURN >/dev/null 2>&1; then
-      log Warn "missing TProxy bypass for local DNS over ${protocol}."
-      missing=1
-    fi
-    if ! ipt -t mangle -C "${MBOX_TPROXY_CHAIN}" -p "${protocol}" \
-      --dport 53 -j RETURN >/dev/null 2>&1; then
-      log Warn "missing TProxy bypass for incoming DNS over ${protocol}."
-      missing=1
-    fi
-    if ! ipt -t mangle -C "${MBOX_TPROXY_CHAIN}" -p "${protocol}" -j TPROXY \
-      --on-ip 127.0.0.1 --on-port "${port}" --tproxy-mark "${mark}/${mask}" >/dev/null 2>&1; then
-      log Warn "missing TProxy target for ${protocol}."
-      missing=1
-    fi
-  done
-
-  if ! ipt -t mangle -C "${MBOX_OUTPUT_CHAIN}" -j MARK \
-    --set-xmark "${mark}/${mask}" >/dev/null 2>&1; then
-    log Warn "missing masked OUTPUT mark rule."
-    missing=1
-  fi
-
-  if ! has_policy_rule "${mark}" "${mask}" "${table}" "${pref}"; then
-    log Warn "missing policy rule for fwmark ${mark}/${mask}, table ${table}, preference ${pref}."
-    missing=1
-  fi
-
-  if ! has_policy_route "${table}"; then
-    log Warn "missing local route in table ${table}."
-    missing=1
-  fi
-
-  return "${missing}"
-}
-
 case "$1" in
+guard)
+  setup_guard_rules
+  ;;
 start)
   setup_rules
   ;;
-status)
-  if check_rules && "${dns_path}" status && "${ipv6_path}" status; then
-    log Info "TProxy rules are enabled."
-  else
-    log Warn "TProxy rules are incomplete or disabled."
-    exit 1
-  fi
-  ;;
 *)
-  log Error "usage: $0 {start|status}"
+  log Error "usage: $0 {start|guard}"
   exit 2
   ;;
 esac

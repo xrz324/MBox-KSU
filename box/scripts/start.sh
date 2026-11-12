@@ -15,8 +15,7 @@ pid_file="${run_path}/${bin_name}.pid"
 
 mkdir -p "${run_path}"
 
-# Runtime process identities live on /data, while their processes do not
-# survive a reboot. Discard the previous boot's identities before starting.
+# Discard process identities and the monitor FIFO left by the previous boot.
 rm -f "${pid_file}" \
   "${run_path}/ipv6_monitor.runtime" \
   "${run_path}/ipv6_monitor.fifo" >/dev/null 2>&1 || true
